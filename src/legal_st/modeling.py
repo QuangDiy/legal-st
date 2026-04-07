@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from sentence_transformers import SentenceTransformer, models
+from transformers import AutoConfig
 
 
 def build_sentence_transformer(
@@ -9,10 +10,15 @@ def build_sentence_transformer(
     pooling: str = "mean",
     normalize_embeddings: bool = True,
 ) -> SentenceTransformer:
+    config = AutoConfig.from_pretrained(model_name, trust_remote_code=False)
+    model_args = {"trust_remote_code": False}
+    if getattr(config, "model_type", None) == "modernbert":
+        model_args["reference_compile"] = False
+
     transformer = models.Transformer(
         model_name,
         max_seq_length=max_seq_length,
-        model_args={"trust_remote_code": False},
+        model_args=model_args,
         tokenizer_args={"use_fast": True},
     )
 

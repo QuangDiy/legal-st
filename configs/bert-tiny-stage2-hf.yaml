@@ -21,6 +21,7 @@ train_batch_size: 32
 learning_rate: 2.0e-5
 warmup_ratio: 0.1
 weight_decay: 0.01
+precision: bf16
 use_amp: true
 use_cached_mnrl: false
 

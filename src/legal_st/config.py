@@ -29,6 +29,7 @@ class ExperimentConfig:
     learning_rate: float = 2e-5
     warmup_ratio: float = 0.1
     weight_decay: float = 0.01
+    precision: str = "bf16"
     use_amp: bool = True
     use_cached_mnrl: bool = False
     validation_size: float = 0.05
@@ -60,6 +61,13 @@ def load_config(path: str | Path) -> ExperimentConfig:
         raise ValueError(f"Unknown config key(s) in {config_path}: {joined}")
 
     config = ExperimentConfig(**payload)
+    config.precision = config.precision.lower()
+    if config.precision not in {"fp32", "fp16", "bf16"}:
+        raise ValueError(
+            f"Unsupported precision in {config_path}: {config.precision}. "
+            "Expected one of: fp32, fp16, bf16"
+        )
+
     if not config.truncate_dims:
         config.truncate_dims = list(config.matryoshka_dims)
     return config

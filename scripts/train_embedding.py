@@ -6,6 +6,8 @@ import shutil
 import sys
 from pathlib import Path
 
+import torch
+
 ROOT = Path(__file__).resolve().parents[1]
 SRC = ROOT / "src"
 if str(SRC) not in sys.path:
@@ -38,6 +40,17 @@ def main() -> None:
     args = parse_args()
     config = load_config(args.config)
     set_seed(config.seed)
+
+    if torch.cuda.is_available():
+        torch.set_float32_matmul_precision("high")
+        torch.backends.cuda.matmul.allow_tf32 = True
+        torch.backends.cudnn.allow_tf32 = True
+        if config.precision == "bf16":
+            torch.set_autocast_dtype("cuda", torch.bfloat16)
+        elif config.precision == "fp16":
+            torch.set_autocast_dtype("cuda", torch.float16)
+
+    use_amp = config.use_amp and config.precision != "fp32"
 
     output_dir = ensure_dir(config.output_dir)
     dump_config(config, output_dir / "resolved_config.yaml")
@@ -96,6 +109,7 @@ def main() -> None:
     )
     print(f"Warmup steps: {warmup_steps}")
     print(f"Output dir: {output_dir}")
+    print(f"Precision: {config.precision}")
 
     model.fit(
         train_objectives=[(train_dataloader, train_loss)],
@@ -106,7 +120,7 @@ def main() -> None:
         weight_decay=config.weight_decay,
         output_path=str(output_dir),
         save_best_model=evaluator is not None,
-        use_amp=config.use_amp,
+        use_amp=use_amp,
         checkpoint_path=str(output_dir / "checkpoints"),
         checkpoint_save_steps=config.checkpoint_save_steps,
         checkpoint_save_total_limit=config.checkpoint_save_total_limit,
