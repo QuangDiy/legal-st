@@ -31,6 +31,25 @@ from legal_st.modeling import build_sentence_transformer
 from legal_st.utils import ensure_dir, set_seed
 
 
+def get_rank() -> int:
+    value = os.getenv("RANK")
+    return int(value) if value is not None else 0
+
+
+def get_local_rank() -> int:
+    value = os.getenv("LOCAL_RANK")
+    return int(value) if value is not None else 0
+
+
+def is_main_process() -> bool:
+    return get_rank() == 0
+
+
+def log(message: str) -> None:
+    if is_main_process():
+        print(message)
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Train a Vietnamese legal embedding model"
@@ -156,6 +175,10 @@ def main() -> None:
     config = load_config(args.config)
     set_seed(config.seed)
 
+    local_rank = get_local_rank()
+    if torch.cuda.is_available() and os.getenv("LOCAL_RANK") is not None:
+        torch.cuda.set_device(local_rank)
+
     hf_token = (
         args.hf_token or os.getenv("HF_TOKEN") or os.getenv("HUGGING_FACE_HUB_TOKEN")
     )
@@ -173,8 +196,9 @@ def main() -> None:
     use_amp = config.use_amp and config.precision != "fp32"
 
     output_dir = ensure_dir(config.output_dir)
-    dump_config(config, output_dir / "resolved_config.yaml")
-    shutil.copy2(args.config, output_dir / Path(args.config).name)
+    if is_main_process():
+        dump_config(config, output_dir / "resolved_config.yaml")
+        shutil.copy2(args.config, output_dir / Path(args.config).name)
 
     records = load_triplet_records(config)
     train_records, validation_records = split_records_by_query(
@@ -183,9 +207,9 @@ def main() -> None:
         seed=config.seed,
     )
 
-    print(f"Loaded {len(records):,} triplets from {config.train_dataset}")
-    print(f"Train triplets: {len(train_records):,}")
-    print(f"Validation triplets: {len(validation_records):,}")
+    log(f"Loaded {len(records):,} triplets from {config.train_dataset}")
+    log(f"Train triplets: {len(train_records):,}")
+    log(f"Validation triplets: {len(validation_records):,}")
 
     model = build_sentence_transformer(
         model_name=config.model_name,
@@ -229,7 +253,7 @@ def main() -> None:
     )
     checkpoint_dir = output_dir / "checkpoints"
     hub_sync = None
-    if config.hf_push_on_save or hf_repo_id is not None:
+    if is_main_process() and (config.hf_push_on_save or hf_repo_id is not None):
         if hf_repo_id is None:
             raise ValueError("hf_repo_id is required when Hugging Face sync is enabled")
         hub_sync = HubSync(
@@ -241,11 +265,13 @@ def main() -> None:
         )
         hub_sync.start()
 
-    print(f"Warmup steps: {warmup_steps}")
-    print(f"Output dir: {output_dir}")
-    print(f"Precision: {config.precision}")
+    log(f"Warmup steps: {warmup_steps}")
+    log(f"Output dir: {output_dir}")
+    log(f"Precision: {config.precision}")
     if hf_repo_id is not None:
-        print(f"HF repo: {hf_repo_id}")
+        log(f"HF repo: {hf_repo_id}")
+    if os.getenv("LOCAL_RANK") is not None:
+        log("Distributed mode: torchrun/DDP")
 
     try:
         model.fit(
@@ -268,8 +294,8 @@ def main() -> None:
         if hub_sync is not None:
             hub_sync.stop()
 
-    print("Training finished.")
-    print(f"Best or final model saved to: {output_dir}")
+    log("Training finished.")
+    log(f"Best or final model saved to: {output_dir}")
 
 
 if __name__ == "__main__":
