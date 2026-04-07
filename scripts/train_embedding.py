@@ -2,11 +2,14 @@ from __future__ import annotations
 
 import argparse
 import math
+import os
 import shutil
 import sys
+import threading
 from pathlib import Path
 
 import torch
+from huggingface_hub import HfApi
 
 ROOT = Path(__file__).resolve().parents[1]
 SRC = ROOT / "src"
@@ -33,13 +36,130 @@ def parse_args() -> argparse.Namespace:
         description="Train a Vietnamese legal embedding model"
     )
     parser.add_argument("--config", required=True, help="Path to YAML config")
+    parser.add_argument("--hf-token", help="Optional Hugging Face token override")
+    parser.add_argument("--hf-repo-id", help="Optional Hugging Face repo override")
     return parser.parse_args()
+
+
+class HubSync:
+    def __init__(
+        self,
+        repo_id: str,
+        output_dir: Path,
+        checkpoint_dir: Path,
+        token: str | None = None,
+        private: bool = False,
+        poll_interval: float = 10.0,
+    ) -> None:
+        self.repo_id = repo_id
+        self.output_dir = output_dir
+        self.checkpoint_dir = checkpoint_dir
+        self.token = token
+        self.private = private
+        self.poll_interval = poll_interval
+        self.api = HfApi(token=token)
+        self.stop_event = threading.Event()
+        self.thread: threading.Thread | None = None
+        self.uploaded_checkpoints: set[str] = set()
+        self.output_signature: tuple[tuple[str, int, int], ...] | None = None
+
+    def start(self) -> None:
+        self.api.create_repo(
+            repo_id=self.repo_id,
+            repo_type="model",
+            private=self.private,
+            exist_ok=True,
+        )
+        self.thread = threading.Thread(
+            target=self._run, name="hf-hub-sync", daemon=True
+        )
+        self.thread.start()
+
+    def stop(self) -> None:
+        self.stop_event.set()
+        if self.thread is not None:
+            self.thread.join()
+
+    def _run(self) -> None:
+        while not self.stop_event.wait(self.poll_interval):
+            self.sync_once()
+        self.sync_once()
+
+    def sync_once(self) -> None:
+        self._sync_checkpoints()
+        self._sync_output_dir()
+
+    def _sync_checkpoints(self) -> None:
+        if not self.checkpoint_dir.exists():
+            return
+
+        checkpoints = sorted(
+            [
+                path
+                for path in self.checkpoint_dir.glob("checkpoint-*")
+                if path.is_dir()
+            ],
+            key=lambda path: int(path.name.split("-")[-1]),
+        )
+        for checkpoint in checkpoints:
+            if checkpoint.name in self.uploaded_checkpoints:
+                continue
+            if not any(checkpoint.iterdir()):
+                continue
+
+            self.api.upload_folder(
+                repo_id=self.repo_id,
+                repo_type="model",
+                folder_path=str(checkpoint),
+                path_in_repo=f"checkpoints/{checkpoint.name}",
+                commit_message=f"Upload {checkpoint.name}",
+            )
+            self.uploaded_checkpoints.add(checkpoint.name)
+            print(f"Uploaded {checkpoint.name} to Hugging Face Hub: {self.repo_id}")
+
+    def _sync_output_dir(self) -> None:
+        marker = self.output_dir / "modules.json"
+        if not marker.exists():
+            return
+
+        files = sorted(
+            path
+            for path in self.output_dir.rglob("*")
+            if path.is_file()
+            and "checkpoints" not in path.relative_to(self.output_dir).parts
+        )
+        signature = tuple(
+            (
+                str(path.relative_to(self.output_dir)).replace("\\", "/"),
+                path.stat().st_size,
+                path.stat().st_mtime_ns,
+            )
+            for path in files
+        )
+        if not signature or signature == self.output_signature:
+            return
+
+        self.api.upload_folder(
+            repo_id=self.repo_id,
+            repo_type="model",
+            folder_path=str(self.output_dir),
+            path_in_repo=".",
+            ignore_patterns=["checkpoints/*"],
+            commit_message="Update exported model",
+        )
+        self.output_signature = signature
+        print(f"Uploaded model snapshot to Hugging Face Hub: {self.repo_id}")
 
 
 def main() -> None:
     args = parse_args()
     config = load_config(args.config)
     set_seed(config.seed)
+
+    hf_token = (
+        args.hf_token or os.getenv("HF_TOKEN") or os.getenv("HUGGING_FACE_HUB_TOKEN")
+    )
+    hf_repo_id = args.hf_repo_id or config.hf_repo_id
 
     if torch.cuda.is_available():
         torch.set_float32_matmul_precision("high")
@@ -107,26 +227,46 @@ def main() -> None:
     warmup_steps = math.ceil(
         len(train_dataloader) * config.num_train_epochs * config.warmup_ratio
     )
+    checkpoint_dir = output_dir / "checkpoints"
+    hub_sync = None
+    if config.hf_push_on_save or hf_repo_id is not None:
+        if hf_repo_id is None:
+            raise ValueError("hf_repo_id is required when Hugging Face sync is enabled")
+        hub_sync = HubSync(
+            repo_id=hf_repo_id,
+            output_dir=output_dir,
+            checkpoint_dir=checkpoint_dir,
+            token=hf_token,
+            private=config.hf_private,
+        )
+        hub_sync.start()
+
     print(f"Warmup steps: {warmup_steps}")
     print(f"Output dir: {output_dir}")
     print(f"Precision: {config.precision}")
+    if hf_repo_id is not None:
+        print(f"HF repo: {hf_repo_id}")
 
-    model.fit(
-        train_objectives=[(train_dataloader, train_loss)],
-        evaluator=evaluator,
-        epochs=config.num_train_epochs,
-        warmup_steps=warmup_steps,
-        optimizer_params={"lr": config.learning_rate},
-        weight_decay=config.weight_decay,
-        output_path=str(output_dir),
-        save_best_model=evaluator is not None,
-        use_amp=use_amp,
-        checkpoint_path=str(output_dir / "checkpoints"),
-        checkpoint_save_steps=config.checkpoint_save_steps,
-        checkpoint_save_total_limit=config.checkpoint_save_total_limit,
-        evaluation_steps=config.evaluation_steps if evaluator is not None else 0,
-        show_progress_bar=True,
-    )
+    try:
+        model.fit(
+            train_objectives=[(train_dataloader, train_loss)],
+            evaluator=evaluator,
+            epochs=config.num_train_epochs,
+            warmup_steps=warmup_steps,
+            optimizer_params={"lr": config.learning_rate},
+            weight_decay=config.weight_decay,
+            output_path=str(output_dir),
+            save_best_model=evaluator is not None,
+            use_amp=use_amp,
+            checkpoint_path=str(checkpoint_dir),
+            checkpoint_save_steps=config.checkpoint_save_steps,
+            checkpoint_save_total_limit=config.checkpoint_save_total_limit,
+            evaluation_steps=config.evaluation_steps if evaluator is not None else 0,
+            show_progress_bar=True,
+        )
+    finally:
+        if hub_sync is not None:
+            hub_sync.stop()
 
     print("Training finished.")
     print(f"Best or final model saved to: {output_dir}")

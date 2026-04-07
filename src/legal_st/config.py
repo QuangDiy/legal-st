@@ -37,6 +37,9 @@ class ExperimentConfig:
     evaluation_steps: int = 250
     checkpoint_save_steps: int = 250
     checkpoint_save_total_limit: int = 2
+    hf_repo_id: str | None = None
+    hf_private: bool = False
+    hf_push_on_save: bool = False
     matryoshka_dims: list[int] = field(default_factory=list)
     truncate_dims: list[int] = field(default_factory=list)
     top_k: list[int] = field(default_factory=lambda: [1, 3, 5, 10])

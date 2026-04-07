@@ -17,7 +17,7 @@ normalize_embeddings: true
 include_hard_negatives: true
 
 num_train_epochs: 3
-train_batch_size: 16
+train_batch_size: 32
 learning_rate: 2.0e-5
 warmup_ratio: 0.1
 weight_decay: 0.01
@@ -27,9 +27,12 @@ use_cached_mnrl: false
 
 validation_size: 0.05
 validation_subset: 1024
-evaluation_steps: 250
-checkpoint_save_steps: 250
+evaluation_steps: 550
+checkpoint_save_steps: 550
 checkpoint_save_total_limit: 2
+hf_repo_id: QuangDuy/bert-base-stage2-sbert
+hf_private: false
+hf_push_on_save: true
 
 matryoshka_dims:
   - 768
