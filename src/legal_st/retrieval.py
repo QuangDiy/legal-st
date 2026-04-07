@@ -217,5 +217,27 @@ def write_results_artifacts(
     (output_path / "results.md").write_text(markdown + "\n", encoding="utf-8")
 
 
+def results_to_readme(
+    rows: list[dict[str, float | int]], config: ExperimentConfig, model_path: str
+) -> str:
+    table = results_to_markdown(rows, config)
+    return "\n".join(
+        [
+            "# " + Path(model_path).name,
+            "",
+            "SentenceTransformer checkpoint fine-tuned for Vietnamese legal retrieval.",
+            "",
+            "## Evaluation",
+            "",
+            f"- Dataset: `{config.eval_dataset}`",
+            f"- Split: `{config.eval_split}`",
+            f"- Truncate dims: `{config.truncate_dims or []}`",
+            "",
+            table,
+            "",
+        ]
+    )
+
+
 def _format_score(value: float | int) -> str:
     return f"{float(value):.6f}"

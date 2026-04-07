@@ -26,13 +26,16 @@ use_amp: true
 use_cached_mnrl: false
 
 validation_size: 0.05
-validation_subset: 1024
+validation_subset: null
 evaluation_steps: 275
 checkpoint_save_steps: 275
 checkpoint_save_total_limit: 2
 hf_repo_id: QuangDuy/bert-tiny-stage2-sbert
 hf_private: false
 hf_push_on_save: true
+run_retrieval_eval_after_train: true
+retrieval_eval_limit_queries: null
+retrieval_eval_extra_corpus_docs: null
 
 matryoshka_dims:
   - 384

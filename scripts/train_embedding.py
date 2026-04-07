@@ -17,6 +17,7 @@ if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
 from sentence_transformers import losses
+from sentence_transformers import SentenceTransformer
 from sentence_transformers.datasets import NoDuplicatesDataLoader
 from sentence_transformers.evaluation import TripletEvaluator
 
@@ -28,6 +29,12 @@ from legal_st.data import (
     split_records_by_query,
 )
 from legal_st.modeling import build_sentence_transformer
+from legal_st.retrieval import (
+    evaluate_dense_retrieval,
+    results_to_markdown,
+    results_to_readme,
+    write_results_artifacts,
+)
 from legal_st.utils import ensure_dir, set_seed
 
 
@@ -48,6 +55,33 @@ def is_main_process() -> bool:
 def log(message: str) -> None:
     if is_main_process():
         print(message)
+
+
+def run_post_train_retrieval_eval(output_dir: Path, config) -> None:
+    eval_model = SentenceTransformer(str(output_dir))
+    eval_model.max_seq_length = config.max_seq_length
+    rows = evaluate_dense_retrieval(
+        model=eval_model,
+        config=config,
+        truncate_dims=config.truncate_dims,
+        limit_queries=config.retrieval_eval_limit_queries,
+        extra_corpus_docs=config.retrieval_eval_extra_corpus_docs,
+    )
+    eval_output_dir = output_dir / "retrieval_eval"
+    write_results_artifacts(
+        output_dir=eval_output_dir,
+        rows=rows,
+        config=config,
+        model_path=str(output_dir),
+    )
+    readme_path = output_dir / "README.md"
+    readme_path.write_text(
+        results_to_readme(rows, config, str(output_dir)),
+        encoding="utf-8",
+    )
+    log(results_to_markdown(rows, config))
+    log(f"Saved retrieval evaluation to: {eval_output_dir}")
+    log(f"Updated model card at: {readme_path}")
 
 
 def parse_args() -> argparse.Namespace:
@@ -293,6 +327,12 @@ def main() -> None:
     finally:
         if hub_sync is not None:
             hub_sync.stop()
+
+    if is_main_process() and config.run_retrieval_eval_after_train:
+        log("Running retrieval evaluation on saved best/final model...")
+        run_post_train_retrieval_eval(output_dir, config)
+        if hub_sync is not None:
+            hub_sync.sync_once()
 
     log("Training finished.")
     log(f"Best or final model saved to: {output_dir}")

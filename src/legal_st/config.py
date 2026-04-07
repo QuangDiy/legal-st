@@ -40,6 +40,9 @@ class ExperimentConfig:
     hf_repo_id: str | None = None
     hf_private: bool = False
     hf_push_on_save: bool = False
+    run_retrieval_eval_after_train: bool = True
+    retrieval_eval_limit_queries: int | None = None
+    retrieval_eval_extra_corpus_docs: int | None = None
     matryoshka_dims: list[int] = field(default_factory=list)
     truncate_dims: list[int] = field(default_factory=list)
     top_k: list[int] = field(default_factory=lambda: [1, 3, 5, 10])
