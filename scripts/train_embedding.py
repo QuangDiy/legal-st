@@ -19,15 +19,13 @@ if str(SRC) not in sys.path:
 from sentence_transformers import losses
 from sentence_transformers import SentenceTransformer
 from sentence_transformers.datasets import NoDuplicatesDataLoader
-from sentence_transformers.evaluation import TripletEvaluator
-
 from legal_st.config import dump_config, load_config
 from legal_st.data import (
-    build_triplet_evaluator_payload,
     load_triplet_records,
     records_to_input_examples,
     split_records_by_query,
 )
+from legal_st.evaluation import LossEvaluator
 from legal_st.modeling import build_sentence_transformer
 from legal_st.retrieval import (
     evaluate_dense_retrieval,
@@ -270,14 +268,19 @@ def main() -> None:
 
     evaluator = None
     if validation_records:
-        anchors, positives, negatives = build_triplet_evaluator_payload(
-            validation_records,
-            subset_size=config.validation_subset,
-        )
-        evaluator = TripletEvaluator(
-            anchors=anchors,
-            positives=positives,
-            negatives=negatives,
+        selected_validation_records = validation_records
+        if (
+            config.validation_subset is not None
+            and len(selected_validation_records) > config.validation_subset
+        ):
+            selected_validation_records = selected_validation_records[
+                : config.validation_subset
+            ]
+
+        validation_examples = records_to_input_examples(selected_validation_records)
+        evaluator = LossEvaluator(
+            examples=validation_examples,
+            loss_model=train_loss,
             name="validation",
             batch_size=config.eval_batch_size,
         )
