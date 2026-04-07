@@ -1,0 +1,52 @@
+run_name: bert-base-stage2-sbert
+model_name: QuangDuy/bert-base-stage2-hf
+output_dir: outputs/bert-base-stage2-sbert
+
+train_dataset: batmangiaicuuthegioi/zalo-legal-triplets
+train_split: train
+eval_dataset: another-symato/VMTEB-Zalo-legel-retrieval-wseg
+eval_corpus_config: corpus
+eval_queries_config: queries
+eval_labels_config: data_ir
+eval_split: train
+
+seed: 42
+max_seq_length: 512
+pooling: mean
+normalize_embeddings: true
+include_hard_negatives: true
+
+num_train_epochs: 3
+train_batch_size: 16
+learning_rate: 2.0e-5
+warmup_ratio: 0.1
+weight_decay: 0.01
+use_amp: true
+use_cached_mnrl: false
+
+validation_size: 0.05
+validation_subset: 1024
+evaluation_steps: 250
+checkpoint_save_steps: 250
+checkpoint_save_total_limit: 2
+
+matryoshka_dims:
+  - 768
+  - 512
+  - 256
+  - 128
+
+truncate_dims:
+  - 768
+  - 512
+  - 256
+  - 128
+
+top_k:
+  - 1
+  - 3
+  - 5
+  - 10
+
+map_at_k: 100
+eval_batch_size: 64

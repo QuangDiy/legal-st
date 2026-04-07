@@ -1,0 +1,28 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "legal-st"
+version = "0.1.0"
+description = "Training and evaluation pipeline for Vietnamese legal embedding models"
+readme = "README.md"
+requires-python = ">=3.10,<3.13"
+dependencies = [
+  "datasets>=2.19,<4",
+  "huggingface-hub>=0.29",
+  "pyyaml>=6.0",
+  "rank-bm25>=0.2.2",
+  "scikit-learn>=1.4",
+  "sentence-transformers>=3.0,<6",
+  "tabulate>=0.9",
+  "torch>=2.5",
+  "transformers>=4.48,<5",
+  "tqdm>=4.66",
+]
+
+[tool.setuptools.package-dir]
+"" = "src"
+
+[tool.setuptools.packages.find]
+where = ["src"]
