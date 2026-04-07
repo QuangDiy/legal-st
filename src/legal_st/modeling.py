@@ -12,13 +12,15 @@ def build_sentence_transformer(
 ) -> SentenceTransformer:
     config = AutoConfig.from_pretrained(model_name, trust_remote_code=False)
     model_args = {"trust_remote_code": False}
+    config_args = {"trust_remote_code": False}
     if getattr(config, "model_type", None) == "modernbert":
-        model_args["reference_compile"] = False
+        config_args["reference_compile"] = False
 
     transformer = models.Transformer(
         model_name,
         max_seq_length=max_seq_length,
         model_args=model_args,
+        config_args=config_args,
         tokenizer_args={"use_fast": True},
     )
 
