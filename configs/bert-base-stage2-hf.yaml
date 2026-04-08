@@ -23,11 +23,6 @@ eval_datasets:
     queries_config: queries
     labels_config: qrels
     split: test
-    corpus_id_col: _id
-    query_id_col: _id
-    query_text_col: text
-    qrel_query_id_col: query-id
-    qrel_corpus_id_col: corpus-id
 
 seed: 42
 max_seq_length: 4096

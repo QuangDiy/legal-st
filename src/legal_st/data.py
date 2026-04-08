@@ -100,6 +100,27 @@ def build_triplet_evaluator_payload(
     return anchors, positives, negatives
 
 
+_ID_ALIASES: list[str] = ["_id", "id", "query_id", "qid", "corpus_id"]
+_TEXT_ALIASES: list[str] = ["text", "question", "query", "sentence"]
+_QREL_QID_ALIASES: list[str] = ["query-id", "query_id", "qid", "q_id"]
+_QREL_DID_ALIASES: list[str] = ["corpus-id", "corpus_id", "doc_id", "did", "document_id"]
+_SCORE_ALIASES: list[str] = ["score", "relevance", "label"]
+
+
+def _resolve_col(row_keys: list[str], preferred: str, aliases: list[str], label: str) -> str:
+    """Return *preferred* if present in *row_keys*, else first matching alias."""
+    if preferred in row_keys:
+        return preferred
+    for alias in aliases:
+        if alias in row_keys:
+            return alias
+    raise KeyError(
+        f"Cannot find column for '{label}'. "
+        f"Tried: {[preferred] + aliases}. "
+        f"Available columns: {row_keys}"
+    )
+
+
 def _build_retrieval_splits(
     dataset_id: str,
     corpus_config: str,
@@ -120,6 +141,19 @@ def _build_retrieval_splits(
     corpus_rows = load_dataset(dataset_id, corpus_config, split=split)
     query_rows = load_dataset(dataset_id, queries_config, split=split)
     qrel_rows = load_dataset(dataset_id, labels_config, split=split)
+
+    # Auto-detect column names using aliases when the configured name is absent
+    q_keys = query_rows.column_names
+    query_id_col = _resolve_col(q_keys, query_id_col, _ID_ALIASES, "query id")
+    query_text_col = _resolve_col(q_keys, query_text_col, _TEXT_ALIASES, "query text")
+
+    qr_keys = qrel_rows.column_names
+    qrel_query_id_col = _resolve_col(qr_keys, qrel_query_id_col, _QREL_QID_ALIASES, "qrel query id")
+    qrel_corpus_id_col = _resolve_col(qr_keys, qrel_corpus_id_col, _QREL_DID_ALIASES, "qrel corpus id")
+    qrel_score_col = _resolve_col(qr_keys, qrel_score_col, _SCORE_ALIASES, "qrel score")
+
+    c_keys = corpus_rows.column_names
+    corpus_id_col = _resolve_col(c_keys, corpus_id_col, _ID_ALIASES, "corpus id")
 
     queries: dict[str, str] = {}
     selected_query_ids: list[str] = []
