@@ -16,7 +16,7 @@ eval_datasets:
   - dataset: taidng/UIT-ViQuAD2.0
     name: UIT-ViQuAD2.0
     format: squad
-    split: validation
+    split: test
   - dataset: GreenNode/zalo-ai-legal-text-retrieval-vn
     name: Zalo-Legal
     corpus_config: corpus
