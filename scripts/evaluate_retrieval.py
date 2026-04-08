@@ -9,6 +9,10 @@ Without a config file (uses built-in defaults + two standard eval datasets):
     uv run scripts/evaluate_retrieval.py \\
         --model-path dangvantuan/vietnamese-embedding
 
+BM25-only baseline (no model required):
+    uv run scripts/evaluate_retrieval.py --bm25-only
+    uv run scripts/evaluate_retrieval.py --bm25-only --config configs/bert-tiny-stage2-hf.yaml
+
 CLI overrides (apply on top of config or defaults):
     --max-seq-length, --eval-batch-size, --truncate-dims, --recall-at-k
 """
@@ -31,6 +35,7 @@ from sentence_transformers import SentenceTransformer
 from legal_st.config import ExperimentConfig, load_config
 from legal_st.utils import safe_max_seq_length
 from legal_st.retrieval import (
+    evaluate_bm25_retrieval_datasets,
     evaluate_dense_retrieval_datasets,
     results_to_markdown,
     results_to_readme,
@@ -79,7 +84,10 @@ def parse_args() -> argparse.Namespace:
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=__doc__,
     )
-    parser.add_argument("--model-path", required=True, help="Local path or HF model id")
+    parser.add_argument("--model-path", default=None,
+                        help="Local path or HF model id (optional when --bm25-only)")
+    parser.add_argument("--bm25-only", action="store_true",
+                        help="Run BM25 baseline only, no dense model needed")
     parser.add_argument(
         "--config", default=None,
         help="Path to YAML experiment config (optional — omit to use built-in defaults)",
@@ -99,17 +107,24 @@ def parse_args() -> argparse.Namespace:
                         help="Override truncate_dims from config (e.g. --truncate-dims 768 512 256)")
     parser.add_argument("--recall-at-k", type=int, nargs="+", default=None,
                         help="Override recall_at_k from config (e.g. --recall-at-k 5 10 100)")
+    parser.add_argument("--no-bm25", action="store_true",
+                        help="Skip BM25 baseline evaluation")
     return parser.parse_args()
 
 
 def main() -> None:
     args = parse_args()
 
+    if not args.bm25_only and args.model_path is None:
+        print("Error: --model-path is required unless --bm25-only is set.")
+        raise SystemExit(1)
+
+    model_name = args.model_path or "bm25"
     if args.config:
         config = load_config(args.config)
     else:
-        print(f"No --config provided. Using built-in eval defaults.")
-        config = _default_config(args.model_path)
+        print("No --config provided. Using built-in eval defaults.")
+        config = _default_config(model_name)
 
     # Apply CLI overrides
     if args.max_seq_length is not None:
@@ -121,52 +136,63 @@ def main() -> None:
     if args.recall_at_k is not None:
         config.recall_at_k = args.recall_at_k
 
-    if torch.cuda.is_available():
-        torch.set_float32_matmul_precision("high")
-        torch.backends.cuda.matmul.allow_tf32 = True
-        torch.backends.cudnn.allow_tf32 = True
-
-    print(f"Loading model: {args.model_path}")
-    model = SentenceTransformer(args.model_path)
-
-    # Apply explicit user override first, then always clamp to the model's
-    # actual position-embedding table size.  Some HF wrappers (e.g. PhoBERT
-    # with 258 positions) store max_seq_length=512 in their ST config, which
-    # causes a CUDA index-out-of-bounds crash on sequences longer than the
-    # real position table.
-    if args.max_seq_length is not None:
-        model.max_seq_length = args.max_seq_length
-    elif args.config is not None:
-        model.max_seq_length = min(config.max_seq_length, model.max_seq_length)
-    model.max_seq_length = safe_max_seq_length(model)
-
-    print(f"max_seq_length: {model.max_seq_length}")
-
-    dataset_results = evaluate_dense_retrieval_datasets(
-        model=model,
-        config=config,
-        truncate_dims=config.truncate_dims or None,
-        limit_queries=args.limit_queries,
-        extra_corpus_docs=args.extra_corpus_docs,
-    )
-
-    model_path = Path(args.model_path)
+    model_path = Path(model_name)
     output_dir = (
         Path(args.output_dir)
         if args.output_dir
         else (model_path / "retrieval_eval" if model_path.exists() else Path("retrieval_eval"))
     )
+
+    # ------------------------------------------------------------------ BM25-only
+    if args.bm25_only:
+        dataset_results = evaluate_bm25_retrieval_datasets(
+            config=config,
+            limit_queries=args.limit_queries,
+            extra_corpus_docs=args.extra_corpus_docs,
+        )
+    # ------------------------------------------------------------------ Dense (+ optional BM25)
+    else:
+        if torch.cuda.is_available():
+            torch.set_float32_matmul_precision("high")
+            torch.backends.cuda.matmul.allow_tf32 = True
+            torch.backends.cudnn.allow_tf32 = True
+
+        print(f"Loading model: {args.model_path}")
+        model = SentenceTransformer(args.model_path)
+
+        # Apply explicit user override first, then always clamp to the model's
+        # actual position-embedding table size.  Some HF wrappers (e.g. PhoBERT
+        # with 258 positions) store max_seq_length=512 in their ST config, which
+        # causes a CUDA index-out-of-bounds crash on sequences longer than the
+        # real position table.
+        if args.max_seq_length is not None:
+            model.max_seq_length = args.max_seq_length
+        elif args.config is not None:
+            model.max_seq_length = min(config.max_seq_length, model.max_seq_length)
+        model.max_seq_length = safe_max_seq_length(model)
+
+        print(f"max_seq_length: {model.max_seq_length}")
+
+        dataset_results = evaluate_dense_retrieval_datasets(
+            model=model,
+            config=config,
+            truncate_dims=config.truncate_dims or None,
+            limit_queries=args.limit_queries,
+            extra_corpus_docs=args.extra_corpus_docs,
+            run_bm25=not args.no_bm25,
+        )
+
     write_multi_results_artifacts(
         output_dir=output_dir,
         dataset_results=dataset_results,
         config=config,
-        model_path=str(args.model_path),
+        model_path=model_name,
     )
 
-    if model_path.exists():
+    if not args.bm25_only and model_path.exists():
         readme_path = model_path / "README.md"
         readme_path.write_text(
-            results_to_readme(dataset_results, config, str(args.model_path)),
+            results_to_readme(dataset_results, config, model_name),
             encoding="utf-8",
         )
         print(f"README updated : {readme_path}")

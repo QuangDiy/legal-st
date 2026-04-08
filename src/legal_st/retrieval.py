@@ -4,7 +4,9 @@ import gc
 import math
 from pathlib import Path
 
+import numpy as np
 import torch
+from rank_bm25 import BM25Okapi
 from sentence_transformers import SentenceTransformer, util
 from tabulate import tabulate
 
@@ -54,6 +56,74 @@ def first_relevant_reciprocal_rank(
         if doc_id in relevant_doc_ids:
             return 1.0 / rank
     return 0.0
+
+
+def _tokenize_for_bm25(text: str) -> list[str]:
+    return text.lower().split()
+
+
+def _run_bm25_metrics(
+    corpus: dict[str, str],
+    queries: dict[str, str],
+    qrels: dict[str, dict[str, int]],
+    config: ExperimentConfig,
+) -> dict[str, float | int]:
+    """Compute retrieval metrics using BM25Okapi as a sparse baseline."""
+    corpus_ids = list(corpus)
+    corpus_texts = [corpus[doc_id] for doc_id in corpus_ids]
+    query_ids = list(queries)
+    query_texts = [queries[qid] for qid in query_ids]
+
+    recall_ks: list[int] = list(config.recall_at_k) if config.recall_at_k else [5, 10, 100]
+    max_k = max(max(config.top_k), config.map_at_k, *recall_ks)
+
+    print("  Building BM25 index …")
+    tokenized_corpus = [_tokenize_for_bm25(t) for t in corpus_texts]
+    bm25 = BM25Okapi(tokenized_corpus)
+
+    totals: dict[str, float] = {f"bm25_accuracy@{k}": 0.0 for k in config.top_k}
+    totals.update({f"bm25_ndcg@{k}": 0.0 for k in config.top_k if k != 1})
+    totals.update({f"bm25_mrr@{k}": 0.0 for k in config.top_k if k != 1})
+    totals.update({f"bm25_recall@{k}": 0.0 for k in recall_ks})
+    totals[f"bm25_map@{config.map_at_k}"] = 0.0
+
+    for query_id, query_text in zip(query_ids, query_texts):
+        tokenized_query = _tokenize_for_bm25(query_text)
+        scores = np.array(bm25.get_scores(tokenized_query))
+        # Efficient top-k using argpartition (avoids full sort of large corpora)
+        n = min(max_k, len(scores))
+        top_indices = np.argpartition(scores, -n)[-n:]
+        top_indices = top_indices[np.argsort(scores[top_indices])[::-1]]
+        ranked_doc_ids = [corpus_ids[int(i)] for i in top_indices]
+
+        relevant_doc_ids = {
+            doc_id for doc_id, rel in qrels[query_id].items() if rel > 0
+        }
+
+        for k in config.top_k:
+            top_k_docs = ranked_doc_ids[:k]
+            hit_count = sum(1 for d in top_k_docs if d in relevant_doc_ids)
+            totals[f"bm25_accuracy@{k}"] += 1.0 if hit_count > 0 else 0.0
+            if k != 1:
+                totals[f"bm25_ndcg@{k}"] += ndcg_at_k(ranked_doc_ids, relevant_doc_ids, k)
+                totals[f"bm25_mrr@{k}"] += first_relevant_reciprocal_rank(
+                    ranked_doc_ids, relevant_doc_ids, k
+                )
+
+        n_relevant = max(len(relevant_doc_ids), 1)
+        for k in recall_ks:
+            hit_count = sum(1 for d in ranked_doc_ids[:k] if d in relevant_doc_ids)
+            totals[f"bm25_recall@{k}"] += hit_count / n_relevant
+
+        totals[f"bm25_map@{config.map_at_k}"] += average_precision_at_k(
+            ranked_doc_ids, relevant_doc_ids, config.map_at_k
+        )
+
+    query_count = float(len(query_ids))
+    row: dict[str, float | int] = {"truncate_dim": -1}  # sentinel: BM25 baseline
+    for key, value in totals.items():
+        row[key] = value / query_count
+    return row
 
 
 def _run_metrics(
@@ -170,11 +240,15 @@ def evaluate_dense_retrieval(
     limit_queries: int | None = None,
     extra_corpus_docs: int | None = None,
     dataset_spec: dict | None = None,
+    run_bm25: bool = True,
 ) -> list[dict[str, float | int]]:
     """Evaluate retrieval on a single dataset.
 
     Pass *dataset_spec* to load from an explicit spec dict instead of config's
     ``eval_dataset`` / ``eval_*_config`` / ``eval_split`` fields.
+
+    When *run_bm25* is True, a BM25Okapi baseline row is prepended to the
+    returned list (``truncate_dim == -1``).
     """
     if dataset_spec is not None:
         corpus, queries, qrels = load_retrieval_dataset_from_spec(
@@ -191,7 +265,53 @@ def evaluate_dense_retrieval(
 
     effective_dims = truncate_dims if truncate_dims is not None else config.truncate_dims
     spec_batch_size = int(dataset_spec["eval_batch_size"]) if dataset_spec and "eval_batch_size" in dataset_spec else None
-    return _run_metrics(corpus, queries, qrels, model, config, effective_dims, batch_size=spec_batch_size)
+    rows = _run_metrics(corpus, queries, qrels, model, config, effective_dims, batch_size=spec_batch_size)
+
+    if run_bm25:
+        print("  Running BM25 baseline …")
+        bm25_row = _run_bm25_metrics(corpus, queries, qrels, config)
+        rows = [bm25_row] + rows
+
+    return rows
+
+
+def evaluate_bm25_retrieval_datasets(
+    config: ExperimentConfig,
+    limit_queries: int | None = None,
+    extra_corpus_docs: int | None = None,
+) -> list[tuple[str, list[dict[str, float | int]]]]:
+    """Run BM25-only evaluation on all datasets defined in config.
+
+    Returns the same ``(name, rows)`` format as
+    :func:`evaluate_dense_retrieval_datasets` so downstream helpers
+    (``write_multi_results_artifacts``, ``results_to_markdown``, …) work unchanged.
+    Each result list contains a single BM25 row (``truncate_dim == -1``).
+    """
+    specs = config.eval_datasets
+    if not specs:
+        specs = [
+            {
+                "dataset": config.eval_dataset,
+                "name": config.eval_dataset,
+                "corpus_config": config.eval_corpus_config,
+                "queries_config": config.eval_queries_config,
+                "labels_config": config.eval_labels_config,
+                "split": config.eval_split,
+            }
+        ]
+
+    results: list[tuple[str, list[dict[str, float | int]]]] = []
+    for spec in specs:
+        name: str = spec.get("name") or spec["dataset"]
+        print(f"\n=== BM25 on: {name} ===")
+        corpus, queries, qrels = load_retrieval_dataset_from_spec(
+            spec,
+            limit_queries=limit_queries,
+            extra_corpus_docs=extra_corpus_docs,
+        )
+        bm25_row = _run_bm25_metrics(corpus, queries, qrels, config)
+        results.append((name, [bm25_row]))
+    return results
 
 
 def evaluate_dense_retrieval_datasets(
@@ -200,12 +320,16 @@ def evaluate_dense_retrieval_datasets(
     truncate_dims: list[int] | None = None,
     limit_queries: int | None = None,
     extra_corpus_docs: int | None = None,
+    run_bm25: bool = True,
 ) -> list[tuple[str, list[dict[str, float | int]]]]:
     """Evaluate on all datasets defined in config.
 
     Returns a list of (dataset_name, rows) tuples.  When ``config.eval_datasets``
     is non-empty those datasets are used; otherwise falls back to the single
     ``config.eval_dataset`` entry.
+
+    When *run_bm25* is True, each dataset also gets a BM25 baseline row
+    prepended (``truncate_dim == -1``).
     """
     specs = config.eval_datasets
     if not specs:
@@ -231,6 +355,7 @@ def evaluate_dense_retrieval_datasets(
             limit_queries=limit_queries,
             extra_corpus_docs=extra_corpus_docs,
             dataset_spec=spec,
+            run_bm25=run_bm25,
         )
         results.append((name, rows))
     return results
@@ -242,7 +367,7 @@ def results_to_markdown(
     recall_ks: list[int] = sorted(config.recall_at_k) if config.recall_at_k else [5, 10, 100]
 
     headers = (
-        ["dim"]
+        ["method"]
         + [f"Accuracy@{k}" for k in config.top_k]
         + [f"NDCG@{k}" for k in config.top_k if k != 1]
         + [f"MRR@{k}" for k in config.top_k if k != 1]
@@ -252,12 +377,15 @@ def results_to_markdown(
 
     table_rows = []
     for row in rows:
-        cells = [int(row["truncate_dim"])]
-        cells += [_fmt(row.get(f"cosine_accuracy@{k}", 0.0)) for k in config.top_k]
-        cells += [_fmt(row.get(f"cosine_ndcg@{k}", 0.0)) for k in config.top_k if k != 1]
-        cells += [_fmt(row.get(f"cosine_mrr@{k}", 0.0)) for k in config.top_k if k != 1]
-        cells += [_fmt(row.get(f"cosine_recall@{k}", 0.0)) for k in recall_ks]
-        cells += [_fmt(row.get(f"cosine_map@{config.map_at_k}", 0.0))]
+        is_bm25 = row.get("truncate_dim") == -1
+        prefix = "bm25" if is_bm25 else "cosine"
+        label = "BM25" if is_bm25 else str(int(row["truncate_dim"]))
+        cells = [label]
+        cells += [_fmt(row.get(f"{prefix}_accuracy@{k}", 0.0)) for k in config.top_k]
+        cells += [_fmt(row.get(f"{prefix}_ndcg@{k}", 0.0)) for k in config.top_k if k != 1]
+        cells += [_fmt(row.get(f"{prefix}_mrr@{k}", 0.0)) for k in config.top_k if k != 1]
+        cells += [_fmt(row.get(f"{prefix}_recall@{k}", 0.0)) for k in recall_ks]
+        cells += [_fmt(row.get(f"{prefix}_map@{config.map_at_k}", 0.0))]
         table_rows.append(cells)
 
     return tabulate(table_rows, headers=headers, tablefmt="github")
