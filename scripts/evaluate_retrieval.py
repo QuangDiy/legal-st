@@ -127,7 +127,17 @@ def main() -> None:
 
     print(f"Loading model: {args.model_path}")
     model = SentenceTransformer(args.model_path)
-    model.max_seq_length = config.max_seq_length
+
+    # Only override max_seq_length when the user explicitly asked for it
+    # (via --max-seq-length or --config). When using the built-in defaults,
+    # keep the model's native value so models like PhoBERT (max 256) don't
+    # receive out-of-range position indices.
+    if args.max_seq_length is not None:
+        model.max_seq_length = args.max_seq_length
+    elif args.config is not None:
+        model.max_seq_length = min(config.max_seq_length, model.max_seq_length)
+
+    print(f"max_seq_length: {model.max_seq_length}")
 
     dataset_results = evaluate_dense_retrieval_datasets(
         model=model,

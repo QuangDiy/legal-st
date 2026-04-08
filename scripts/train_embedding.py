@@ -129,7 +129,7 @@ def log(message: str) -> None:
 
 def run_post_train_retrieval_eval(output_dir: Path, config) -> None:
     eval_model = SentenceTransformer(str(output_dir))
-    eval_model.max_seq_length = config.max_seq_length
+    eval_model.max_seq_length = min(config.max_seq_length, eval_model.max_seq_length)
     dataset_results = evaluate_dense_retrieval_datasets(
         model=eval_model,
         config=config,
