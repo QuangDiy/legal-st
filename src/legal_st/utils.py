@@ -32,3 +32,30 @@ def set_seed(seed: int) -> None:
 
 def normalize_text(text: str) -> str:
     return " ".join(str(text).split())
+
+
+def safe_max_seq_length(model) -> int:
+    """Return the largest seq length that won't overflow the model's position table.
+
+    SentenceTransformer configs sometimes carry a ``max_seq_length`` that exceeds
+    the underlying transformer's ``max_position_embeddings`` (e.g. PhoBERT has 258
+    positions but some HF wrappers advertise 512).  Passing sequences longer than
+    the position table causes a CUDA scatter/gather index-out-of-bounds crash.
+    """
+    current = model.max_seq_length
+    try:
+        transformer_module = model[0]
+        hf_config = transformer_module.auto_model.config
+        max_pos = hf_config.max_position_embeddings
+        # RoBERTa-family reserves positions 0 and 1 (padding + start offset)
+        if getattr(hf_config, "model_type", "").lower() in ("roberta", "phobert"):
+            max_pos = max_pos - 2
+        if max_pos < current:
+            print(
+                f"[safe_max_seq_length] Clamping max_seq_length {current} → {max_pos} "
+                f"(model max_position_embeddings={hf_config.max_position_embeddings})"
+            )
+            return max_pos
+    except Exception:
+        pass
+    return current

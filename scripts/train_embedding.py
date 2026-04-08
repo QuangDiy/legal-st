@@ -41,7 +41,7 @@ from legal_st.retrieval import (
     results_to_readme,
     write_multi_results_artifacts,
 )
-from legal_st.utils import ensure_dir, set_seed
+from legal_st.utils import ensure_dir, safe_max_seq_length, set_seed
 
 
 class EarlyStoppingCallback(TrainerCallback):
@@ -129,7 +129,7 @@ def log(message: str) -> None:
 
 def run_post_train_retrieval_eval(output_dir: Path, config) -> None:
     eval_model = SentenceTransformer(str(output_dir))
-    eval_model.max_seq_length = min(config.max_seq_length, eval_model.max_seq_length)
+    eval_model.max_seq_length = min(config.max_seq_length, safe_max_seq_length(eval_model))
     dataset_results = evaluate_dense_retrieval_datasets(
         model=eval_model,
         config=config,

@@ -128,14 +128,16 @@ def main() -> None:
     print(f"Loading model: {args.model_path}")
     model = SentenceTransformer(args.model_path)
 
-    # Only override max_seq_length when the user explicitly asked for it
-    # (via --max-seq-length or --config). When using the built-in defaults,
-    # keep the model's native value so models like PhoBERT (max 256) don't
-    # receive out-of-range position indices.
+    # Apply explicit user override first, then always clamp to the model's
+    # actual position-embedding table size.  Some HF wrappers (e.g. PhoBERT
+    # with 258 positions) store max_seq_length=512 in their ST config, which
+    # causes a CUDA index-out-of-bounds crash on sequences longer than the
+    # real position table.
     if args.max_seq_length is not None:
         model.max_seq_length = args.max_seq_length
     elif args.config is not None:
         model.max_seq_length = min(config.max_seq_length, model.max_seq_length)
+    model.max_seq_length = safe_max_seq_length(model)
 
     print(f"max_seq_length: {model.max_seq_length}")
 
