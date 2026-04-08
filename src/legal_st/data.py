@@ -197,6 +197,50 @@ def load_retrieval_dataset(
     )
 
 
+def _load_squad_format(
+    dataset_id: str,
+    split: str,
+    context_col: str,
+    question_col: str,
+    id_col: str,
+    title_col: str,
+    limit_queries: int | None,
+) -> tuple[dict[str, str], dict[str, str], dict[str, dict[str, int]]]:
+    """Load a SQuAD-style dataset (single split, context + question per row).
+
+    Corpus documents are built from unique context passages; queries from
+    questions; qrels map each question to its containing passage.
+    """
+    rows = load_dataset(dataset_id, split=split)
+
+    corpus: dict[str, str] = {}
+    queries: dict[str, str] = {}
+    qrels: dict[str, dict[str, int]] = defaultdict(dict)
+    context_to_id: dict[str, str] = {}
+
+    for row in rows:
+        context = normalize_text(row[context_col])
+        title = normalize_text(row.get(title_col) or "")
+
+        if context not in context_to_id:
+            corpus_id = f"corpus_{len(context_to_id)}"
+            context_to_id[context] = corpus_id
+            corpus[corpus_id] = build_corpus_text(title=title, text=context)
+
+        corpus_id = context_to_id[context]
+        query_id = str(row[id_col])
+        question = normalize_text(row[question_col])
+
+        if limit_queries is not None and len(queries) >= limit_queries:
+            break
+
+        if query_id not in queries:
+            queries[query_id] = question
+        qrels[query_id][corpus_id] = 1
+
+    return corpus, queries, dict(qrels)
+
+
 def load_retrieval_dataset_from_spec(
     spec: dict,
     limit_queries: int | None = None,
@@ -205,12 +249,34 @@ def load_retrieval_dataset_from_spec(
     """Load a retrieval dataset from a spec dict (as used in config.eval_datasets).
 
     Required key: ``dataset``.
-    Optional keys with defaults: ``corpus_config`` ("corpus"), ``queries_config``
-    ("queries"), ``labels_config`` ("qrels"), ``split`` ("test").
-    Optional column-name overrides: ``corpus_id_col``, ``corpus_title_col``,
-    ``corpus_text_col``, ``query_id_col``, ``query_text_col``,
-    ``qrel_query_id_col``, ``qrel_corpus_id_col``, ``qrel_score_col``.
+    Optional ``format`` key selects the loader:
+      - ``"beir"`` (default): separate corpus / queries / qrels configs.
+      - ``"squad"``: single split with context + question columns (SQuAD-style).
+
+    BEIR optional keys (with defaults):
+      ``corpus_config`` ("corpus"), ``queries_config`` ("queries"),
+      ``labels_config`` ("qrels"), ``split`` ("test"), plus column-name
+      overrides ``corpus_id_col``, ``corpus_title_col``, ``corpus_text_col``,
+      ``query_id_col``, ``query_text_col``, ``qrel_query_id_col``,
+      ``qrel_corpus_id_col``, ``qrel_score_col``.
+
+    SQuAD optional keys (with defaults):
+      ``split`` ("validation"), ``context_col`` ("context"),
+      ``question_col`` ("question"), ``id_col`` ("id"), ``title_col`` ("title").
     """
+    fmt = spec.get("format", "beir")
+
+    if fmt == "squad":
+        return _load_squad_format(
+            dataset_id=spec["dataset"],
+            split=spec.get("split", "validation"),
+            context_col=spec.get("context_col", "context"),
+            question_col=spec.get("question_col", "question"),
+            id_col=spec.get("id_col", "id"),
+            title_col=spec.get("title_col", "title"),
+            limit_queries=limit_queries,
+        )
+
     return _build_retrieval_splits(
         dataset_id=spec["dataset"],
         corpus_config=spec.get("corpus_config", "corpus"),
