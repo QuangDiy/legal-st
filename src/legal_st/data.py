@@ -22,12 +22,29 @@ def _trim_triplet_row(row: dict, include_hard_negatives: bool) -> dict[str, str]
     return payload
 
 
-def load_triplet_records(config: ExperimentConfig) -> list[dict[str, str]]:
-    dataset = load_dataset(config.train_dataset, split=config.train_split)
+def _load_one_triplet_dataset(
+    dataset_id: str, split: str, include_hard_negatives: bool
+) -> list[dict[str, str]]:
+    dataset = load_dataset(dataset_id, split=split)
     return [
-        _trim_triplet_row(row, include_hard_negatives=config.include_hard_negatives)
+        _trim_triplet_row(row, include_hard_negatives=include_hard_negatives)
         for row in dataset
     ]
+
+
+def load_triplet_records(config: ExperimentConfig) -> list[dict[str, str]]:
+    dataset_ids = (
+        config.train_dataset
+        if isinstance(config.train_dataset, list)
+        else [config.train_dataset]
+    )
+    all_records: list[dict[str, str]] = []
+    for dataset_id in dataset_ids:
+        records = _load_one_triplet_dataset(
+            dataset_id, config.train_split, config.include_hard_negatives
+        )
+        all_records.extend(records)
+    return all_records
 
 
 def split_records_by_query(
@@ -83,39 +100,45 @@ def build_triplet_evaluator_payload(
     return anchors, positives, negatives
 
 
-def load_retrieval_dataset(
-    config: ExperimentConfig,
-    limit_queries: int | None = None,
-    extra_corpus_docs: int | None = None,
+def _build_retrieval_splits(
+    dataset_id: str,
+    corpus_config: str,
+    queries_config: str,
+    labels_config: str,
+    split: str,
+    corpus_id_col: str,
+    corpus_title_col: str,
+    corpus_text_col: str,
+    query_id_col: str,
+    query_text_col: str,
+    qrel_query_id_col: str,
+    qrel_corpus_id_col: str,
+    qrel_score_col: str,
+    limit_queries: int | None,
+    extra_corpus_docs: int | None,
 ) -> tuple[dict[str, str], dict[str, str], dict[str, dict[str, int]]]:
-    corpus_rows = load_dataset(
-        config.eval_dataset, config.eval_corpus_config, split=config.eval_split
-    )
-    query_rows = load_dataset(
-        config.eval_dataset, config.eval_queries_config, split=config.eval_split
-    )
-    qrel_rows = load_dataset(
-        config.eval_dataset, config.eval_labels_config, split=config.eval_split
-    )
+    corpus_rows = load_dataset(dataset_id, corpus_config, split=split)
+    query_rows = load_dataset(dataset_id, queries_config, split=split)
+    qrel_rows = load_dataset(dataset_id, labels_config, split=split)
 
     queries: dict[str, str] = {}
     selected_query_ids: list[str] = []
     for row in query_rows:
-        query_id = row["query_id"]
+        query_id = str(row[query_id_col])
         if limit_queries is not None and len(selected_query_ids) >= limit_queries:
             break
         selected_query_ids.append(query_id)
-        queries[query_id] = normalize_text(row["question"])
+        queries[query_id] = normalize_text(row[query_text_col])
 
     selected_query_ids_set = set(selected_query_ids)
     relevant_docs: dict[str, dict[str, int]] = defaultdict(dict)
     required_corpus_ids: set[str] = set()
     for row in qrel_rows:
-        query_id = row["query_id"]
+        query_id = str(row[qrel_query_id_col])
         if query_id not in selected_query_ids_set:
             continue
-        corpus_id = row["corpus_id"]
-        score = int(row["score"])
+        corpus_id = str(row[qrel_corpus_id_col])
+        score = int(row[qrel_score_col])
         relevant_docs[query_id][corpus_id] = score
         if score > 0:
             required_corpus_ids.add(corpus_id)
@@ -123,7 +146,7 @@ def load_retrieval_dataset(
     corpus: dict[str, str] = {}
     extras_remaining = None if extra_corpus_docs is None else extra_corpus_docs
     for row in corpus_rows:
-        corpus_id = row["id"]
+        corpus_id = str(row[corpus_id_col])
         include_row = corpus_id in required_corpus_ids
         if not include_row and extras_remaining is not None and extras_remaining > 0:
             include_row = True
@@ -131,8 +154,8 @@ def load_retrieval_dataset(
         elif not include_row and extras_remaining is not None:
             continue
 
-        title = normalize_text(row.get("title") or "")
-        text = normalize_text(row.get("text") or "")
+        title = normalize_text(row.get(corpus_title_col) or "")
+        text = normalize_text(row.get(corpus_text_col) or "")
         corpus[corpus_id] = build_corpus_text(title=title, text=text)
 
     filtered_qrels: dict[str, dict[str, int]] = {}
@@ -148,6 +171,63 @@ def load_retrieval_dataset(
         if query_id in filtered_qrels
     }
     return corpus, filtered_queries, filtered_qrels
+
+
+def load_retrieval_dataset(
+    config: ExperimentConfig,
+    limit_queries: int | None = None,
+    extra_corpus_docs: int | None = None,
+) -> tuple[dict[str, str], dict[str, str], dict[str, dict[str, int]]]:
+    return _build_retrieval_splits(
+        dataset_id=config.eval_dataset,
+        corpus_config=config.eval_corpus_config,
+        queries_config=config.eval_queries_config,
+        labels_config=config.eval_labels_config,
+        split=config.eval_split,
+        corpus_id_col="id",
+        corpus_title_col="title",
+        corpus_text_col="text",
+        query_id_col="query_id",
+        query_text_col="question",
+        qrel_query_id_col="query_id",
+        qrel_corpus_id_col="corpus_id",
+        qrel_score_col="score",
+        limit_queries=limit_queries,
+        extra_corpus_docs=extra_corpus_docs,
+    )
+
+
+def load_retrieval_dataset_from_spec(
+    spec: dict,
+    limit_queries: int | None = None,
+    extra_corpus_docs: int | None = None,
+) -> tuple[dict[str, str], dict[str, str], dict[str, dict[str, int]]]:
+    """Load a retrieval dataset from a spec dict (as used in config.eval_datasets).
+
+    Required key: ``dataset``.
+    Optional keys with defaults: ``corpus_config`` ("corpus"), ``queries_config``
+    ("queries"), ``labels_config`` ("qrels"), ``split`` ("test").
+    Optional column-name overrides: ``corpus_id_col``, ``corpus_title_col``,
+    ``corpus_text_col``, ``query_id_col``, ``query_text_col``,
+    ``qrel_query_id_col``, ``qrel_corpus_id_col``, ``qrel_score_col``.
+    """
+    return _build_retrieval_splits(
+        dataset_id=spec["dataset"],
+        corpus_config=spec.get("corpus_config", "corpus"),
+        queries_config=spec.get("queries_config", "queries"),
+        labels_config=spec.get("labels_config", "qrels"),
+        split=spec.get("split", "test"),
+        corpus_id_col=spec.get("corpus_id_col", "id"),
+        corpus_title_col=spec.get("corpus_title_col", "title"),
+        corpus_text_col=spec.get("corpus_text_col", "text"),
+        query_id_col=spec.get("query_id_col", "query_id"),
+        query_text_col=spec.get("query_text_col", "question"),
+        qrel_query_id_col=spec.get("qrel_query_id_col", "query_id"),
+        qrel_corpus_id_col=spec.get("qrel_corpus_id_col", "corpus_id"),
+        qrel_score_col=spec.get("qrel_score_col", "score"),
+        limit_queries=limit_queries,
+        extra_corpus_docs=extra_corpus_docs,
+    )
 
 
 def build_corpus_text(title: str, text: str) -> str:

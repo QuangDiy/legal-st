@@ -9,7 +9,7 @@ from sentence_transformers import SentenceTransformer, util
 from tabulate import tabulate
 
 from .config import ExperimentConfig
-from .data import load_retrieval_dataset
+from .data import load_retrieval_dataset, load_retrieval_dataset_from_spec
 from .utils import ensure_dir, save_json
 
 
@@ -56,19 +56,14 @@ def first_relevant_reciprocal_rank(
     return 0.0
 
 
-def evaluate_dense_retrieval(
+def _run_metrics(
+    corpus: dict[str, str],
+    queries: dict[str, str],
+    qrels: dict[str, dict[str, int]],
     model: SentenceTransformer,
     config: ExperimentConfig,
-    truncate_dims: list[int] | None = None,
-    limit_queries: int | None = None,
-    extra_corpus_docs: int | None = None,
+    truncate_dims: list[int] | None,
 ) -> list[dict[str, float | int]]:
-    corpus, queries, qrels = load_retrieval_dataset(
-        config,
-        limit_queries=limit_queries,
-        extra_corpus_docs=extra_corpus_docs,
-    )
-
     corpus_ids = list(corpus)
     corpus_texts = [corpus[doc_id] for doc_id in corpus_ids]
     query_ids = list(queries)
@@ -77,7 +72,8 @@ def evaluate_dense_retrieval(
     if truncate_dims is None or not truncate_dims:
         truncate_dims = [model.get_sentence_embedding_dimension()]
 
-    max_k = max(max(config.top_k), config.map_at_k)
+    recall_ks: list[int] = list(config.recall_at_k) if config.recall_at_k else [5, 10, 100]
+    max_k = max(max(config.top_k), config.map_at_k, *recall_ks)
     rows: list[dict[str, float | int]] = []
     original_truncate_dim = getattr(model, "truncate_dim", None)
 
@@ -108,9 +104,9 @@ def evaluate_dense_retrieval(
 
         totals: dict[str, float] = {f"cosine_accuracy@{k}": 0.0 for k in config.top_k}
         totals.update({f"cosine_precision@{k}": 0.0 for k in config.top_k})
-        totals.update({f"cosine_recall@{k}": 0.0 for k in config.top_k})
         totals.update({f"cosine_ndcg@{k}": 0.0 for k in config.top_k if k != 1})
         totals.update({f"cosine_mrr@{k}": 0.0 for k in config.top_k if k != 1})
+        totals.update({f"cosine_recall@{k}": 0.0 for k in recall_ks})
         totals[f"cosine_map@{config.map_at_k}"] = 0.0
 
         for query_index, query_id in enumerate(query_ids):
@@ -128,14 +124,20 @@ def evaluate_dense_retrieval(
                 )
                 totals[f"cosine_accuracy@{k}"] += 1.0 if hit_count > 0 else 0.0
                 totals[f"cosine_precision@{k}"] += hit_count / k
-                totals[f"cosine_recall@{k}"] += hit_count / len(relevant_doc_ids)
                 if k != 1:
                     totals[f"cosine_ndcg@{k}"] += ndcg_at_k(
-                        top_k_docs, relevant_doc_ids, k
+                        ranked_doc_ids, relevant_doc_ids, k
                     )
                     totals[f"cosine_mrr@{k}"] += first_relevant_reciprocal_rank(
-                        top_k_docs, relevant_doc_ids, k
+                        ranked_doc_ids, relevant_doc_ids, k
                     )
+
+            n_relevant = max(len(relevant_doc_ids), 1)
+            for k in recall_ks:
+                hit_count = sum(
+                    1 for doc_id in ranked_doc_ids[:k] if doc_id in relevant_doc_ids
+                )
+                totals[f"cosine_recall@{k}"] += hit_count / n_relevant
 
             totals[f"cosine_map@{config.map_at_k}"] += average_precision_at_k(
                 ranked_doc_ids,
@@ -159,42 +161,101 @@ def evaluate_dense_retrieval(
     return rows
 
 
+def evaluate_dense_retrieval(
+    model: SentenceTransformer,
+    config: ExperimentConfig,
+    truncate_dims: list[int] | None = None,
+    limit_queries: int | None = None,
+    extra_corpus_docs: int | None = None,
+    dataset_spec: dict | None = None,
+) -> list[dict[str, float | int]]:
+    """Evaluate retrieval on a single dataset.
+
+    Pass *dataset_spec* to load from an explicit spec dict instead of config's
+    ``eval_dataset`` / ``eval_*_config`` / ``eval_split`` fields.
+    """
+    if dataset_spec is not None:
+        corpus, queries, qrels = load_retrieval_dataset_from_spec(
+            dataset_spec,
+            limit_queries=limit_queries,
+            extra_corpus_docs=extra_corpus_docs,
+        )
+    else:
+        corpus, queries, qrels = load_retrieval_dataset(
+            config,
+            limit_queries=limit_queries,
+            extra_corpus_docs=extra_corpus_docs,
+        )
+
+    effective_dims = truncate_dims if truncate_dims is not None else config.truncate_dims
+    return _run_metrics(corpus, queries, qrels, model, config, effective_dims)
+
+
+def evaluate_dense_retrieval_datasets(
+    model: SentenceTransformer,
+    config: ExperimentConfig,
+    truncate_dims: list[int] | None = None,
+    limit_queries: int | None = None,
+    extra_corpus_docs: int | None = None,
+) -> list[tuple[str, list[dict[str, float | int]]]]:
+    """Evaluate on all datasets defined in config.
+
+    Returns a list of (dataset_name, rows) tuples.  When ``config.eval_datasets``
+    is non-empty those datasets are used; otherwise falls back to the single
+    ``config.eval_dataset`` entry.
+    """
+    specs = config.eval_datasets
+    if not specs:
+        specs = [
+            {
+                "dataset": config.eval_dataset,
+                "name": config.eval_dataset,
+                "corpus_config": config.eval_corpus_config,
+                "queries_config": config.eval_queries_config,
+                "labels_config": config.eval_labels_config,
+                "split": config.eval_split,
+            }
+        ]
+
+    results: list[tuple[str, list[dict[str, float | int]]]] = []
+    for spec in specs:
+        name: str = spec.get("name") or spec["dataset"]
+        print(f"\n=== Evaluating on: {name} ===")
+        rows = evaluate_dense_retrieval(
+            model=model,
+            config=config,
+            truncate_dims=truncate_dims,
+            limit_queries=limit_queries,
+            extra_corpus_docs=extra_corpus_docs,
+            dataset_spec=spec,
+        )
+        results.append((name, rows))
+    return results
+
+
 def results_to_markdown(
     rows: list[dict[str, float | int]], config: ExperimentConfig
 ) -> str:
-    headers = [
-        "dim",
-        "Accuracy@1",
-        "Accuracy@3",
-        "Accuracy@5",
-        "Accuracy@10",
-        "NDCG@3",
-        "NDCG@5",
-        "NDCG@10",
-        "MRR@3",
-        "MRR@5",
-        "MRR@10",
-        f"MAP@{config.map_at_k}",
-    ]
+    recall_ks: list[int] = sorted(config.recall_at_k) if config.recall_at_k else [5, 10, 100]
+
+    headers = (
+        ["dim"]
+        + [f"Accuracy@{k}" for k in config.top_k]
+        + [f"NDCG@{k}" for k in config.top_k if k != 1]
+        + [f"MRR@{k}" for k in config.top_k if k != 1]
+        + [f"Recall@{k}" for k in recall_ks]
+        + [f"MAP@{config.map_at_k}"]
+    )
 
     table_rows = []
     for row in rows:
-        table_rows.append(
-            [
-                int(row["truncate_dim"]),
-                _format_score(row.get("cosine_accuracy@1", 0.0)),
-                _format_score(row.get("cosine_accuracy@3", 0.0)),
-                _format_score(row.get("cosine_accuracy@5", 0.0)),
-                _format_score(row.get("cosine_accuracy@10", 0.0)),
-                _format_score(row.get("cosine_ndcg@3", 0.0)),
-                _format_score(row.get("cosine_ndcg@5", 0.0)),
-                _format_score(row.get("cosine_ndcg@10", 0.0)),
-                _format_score(row.get("cosine_mrr@3", 0.0)),
-                _format_score(row.get("cosine_mrr@5", 0.0)),
-                _format_score(row.get("cosine_mrr@10", 0.0)),
-                _format_score(row.get(f"cosine_map@{config.map_at_k}", 0.0)),
-            ]
-        )
+        cells = [int(row["truncate_dim"])]
+        cells += [_fmt(row.get(f"cosine_accuracy@{k}", 0.0)) for k in config.top_k]
+        cells += [_fmt(row.get(f"cosine_ndcg@{k}", 0.0)) for k in config.top_k if k != 1]
+        cells += [_fmt(row.get(f"cosine_mrr@{k}", 0.0)) for k in config.top_k if k != 1]
+        cells += [_fmt(row.get(f"cosine_recall@{k}", 0.0)) for k in recall_ks]
+        cells += [_fmt(row.get(f"cosine_map@{config.map_at_k}", 0.0))]
+        table_rows.append(cells)
 
     return tabulate(table_rows, headers=headers, tablefmt="github")
 
@@ -204,11 +265,13 @@ def write_results_artifacts(
     rows: list[dict[str, float | int]],
     config: ExperimentConfig,
     model_path: str,
+    dataset_name: str | None = None,
+    dataset_id: str | None = None,
 ) -> None:
     output_path = ensure_dir(output_dir)
     payload = {
         "model_path": model_path,
-        "dataset": config.eval_dataset,
+        "dataset": dataset_id or config.eval_dataset,
         "eval_split": config.eval_split,
         "results": rows,
     }
@@ -217,27 +280,58 @@ def write_results_artifacts(
     (output_path / "results.md").write_text(markdown + "\n", encoding="utf-8")
 
 
+def write_multi_results_artifacts(
+    output_dir: str | Path,
+    dataset_results: list[tuple[str, list[dict[str, float | int]]]],
+    config: ExperimentConfig,
+    model_path: str,
+) -> None:
+    """Write per-dataset subdirs and a combined results.json."""
+    output_path = ensure_dir(output_dir)
+    all_results = []
+    for name, rows in dataset_results:
+        safe_name = name.replace("/", "_")
+        write_results_artifacts(
+            output_dir=output_path / safe_name,
+            rows=rows,
+            config=config,
+            model_path=model_path,
+            dataset_name=name,
+            dataset_id=name,
+        )
+        all_results.append({"dataset": name, "results": rows})
+
+    save_json({"model_path": model_path, "datasets": all_results}, output_path / "results.json")
+
+
 def results_to_readme(
-    rows: list[dict[str, float | int]], config: ExperimentConfig, model_path: str
+    dataset_results: list[tuple[str, list[dict[str, float | int]]]],
+    config: ExperimentConfig,
+    model_path: str,
 ) -> str:
-    table = results_to_markdown(rows, config)
-    return "\n".join(
-        [
-            "# " + Path(model_path).name,
+    lines = [
+        "# " + Path(model_path).name,
+        "",
+        "SentenceTransformer checkpoint fine-tuned for Vietnamese legal retrieval.",
+        "",
+        "## Evaluation",
+        "",
+        f"- Truncate dims: `{config.truncate_dims or []}`",
+        "",
+    ]
+    for name, rows in dataset_results:
+        lines += [
+            f"### {name}",
             "",
-            "SentenceTransformer checkpoint fine-tuned for Vietnamese legal retrieval.",
-            "",
-            "## Evaluation",
-            "",
-            f"- Dataset: `{config.eval_dataset}`",
-            f"- Split: `{config.eval_split}`",
-            f"- Truncate dims: `{config.truncate_dims or []}`",
-            "",
-            table,
+            results_to_markdown(rows, config),
             "",
         ]
-    )
+    return "\n".join(lines)
+
+
+def _fmt(value: float | int) -> str:
+    return f"{float(value):.6f}"
 
 
 def _format_score(value: float | int) -> str:
-    return f"{float(value):.6f}"
+    return _fmt(value)

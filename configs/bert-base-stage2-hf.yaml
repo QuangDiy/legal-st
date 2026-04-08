@@ -2,7 +2,9 @@ run_name: bert-base-stage2-sbert
 model_name: QuangDuy/bert-base-stage2-hf
 output_dir: outputs/bert-base-stage2-sbert
 
-train_dataset: batmangiaicuuthegioi/zalo-legal-triplets
+train_dataset:
+  - batmangiaicuuthegioi/zalo-legal-triplets
+  - QuangDuy/mmarco-vi-hard-negatives
 train_split: train
 eval_dataset: another-symato/VMTEB-Zalo-legel-retrieval-wseg
 eval_corpus_config: corpus
@@ -10,13 +12,27 @@ eval_queries_config: queries
 eval_labels_config: data_ir
 eval_split: train
 
+eval_datasets:
+  - dataset: taidng/UIT-ViQuAD2.0
+    name: UIT-ViQuAD2.0
+    corpus_config: corpus
+    queries_config: queries
+    labels_config: qrels
+    split: test
+  - dataset: GreenNode/zalo-ai-legal-text-retrieval-vn
+    name: Zalo-Legal
+    corpus_config: corpus
+    queries_config: queries
+    labels_config: qrels
+    split: test
+
 seed: 42
-max_seq_length: 512
+max_seq_length: 4096
 pooling: mean
 normalize_embeddings: true
 include_hard_negatives: true
 
-num_train_epochs: 3
+num_train_epochs: 5
 train_batch_size: 32
 learning_rate: 5.0e-5
 warmup_ratio: 0.1
@@ -27,9 +43,10 @@ use_cached_mnrl: false
 
 validation_size: 0.05
 validation_subset: null
-evaluation_steps: 550
-checkpoint_save_steps: 550
-checkpoint_save_total_limit: 2
+evaluation_steps: 4000
+checkpoint_save_steps: 4000
+checkpoint_save_total_limit: 5
+early_stopping_patience: 4
 hf_repo_id: QuangDuy/bert-base-stage2-sbert
 hf_private: false
 hf_push_on_save: true
@@ -54,6 +71,11 @@ top_k:
   - 3
   - 5
   - 10
+
+recall_at_k:
+  - 5
+  - 10
+  - 100
 
 map_at_k: 100
 eval_batch_size: 64

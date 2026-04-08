@@ -1,11 +1,52 @@
 from __future__ import annotations
 
+import contextlib
+import csv
+import os
+from pathlib import Path
 from typing import Iterable
 
 import torch
+import torch.nn as nn
 from sentence_transformers import InputExample, SentenceTransformer
 from sentence_transformers.evaluation import SentenceEvaluator
 from torch.utils.data import DataLoader
+
+
+def _is_main_process() -> bool:
+    return os.environ.get("RANK", "0") == "0"
+
+
+@contextlib.contextmanager
+def _patch_model_in_loss(loss_module: nn.Module, model: SentenceTransformer):
+    """
+    Temporarily replace every '.model' attribute inside *loss_module* that is
+    an nn.Module with the freshly-updated *model* passed by the Trainer.
+
+    Background: SentenceTransformerTrainer.compute_loss() replaces loss.model
+    with the DDP-wrapped model on the first training step.  The evaluator
+    receives the *unwrapped* SentenceTransformer, but loss_model.model still
+    points to the (potentially stale) DDP wrapper.  This context manager
+    patches the reference for the duration of the eval forward pass so that
+    the evaluator always uses the model weights that the Trainer considers
+    up-to-date.
+    """
+    saved: list[tuple[nn.Module, nn.Module]] = []
+
+    def _replace(m: nn.Module) -> None:
+        for name, child in list(m.named_children()):
+            if name == "model" and isinstance(child, nn.Module):
+                saved.append((m, child))
+                setattr(m, name, model)
+            else:
+                _replace(child)
+
+    _replace(loss_module)
+    try:
+        yield
+    finally:
+        for parent, original in saved:
+            parent.model = original
 
 
 class LossEvaluator(SentenceEvaluator):
@@ -41,16 +82,16 @@ class LossEvaluator(SentenceEvaluator):
             collate_fn=model.smart_batching_collate,
         )
 
-        loss_model = self.loss_model.to(model.device)
         was_training = model.training
-        loss_was_training = loss_model.training
         model.eval()
-        loss_model.eval()
+        self.loss_model.eval()
 
         total_loss = 0.0
         total_batches = 0
 
-        with torch.no_grad():
+        # Patch loss_model so its internal .model references point to the
+        # current (unwrapped) SentenceTransformer instead of a DDP wrapper.
+        with torch.no_grad(), _patch_model_in_loss(self.loss_model, model):
             for features, labels in dataloader:
                 features = [
                     {
@@ -62,20 +103,36 @@ class LossEvaluator(SentenceEvaluator):
                 if hasattr(labels, "to"):
                     labels = labels.to(model.device)
 
-                loss = loss_model(features, labels)
+                loss = self.loss_model(features, labels)
                 total_loss += loss.detach().float().item()
                 total_batches += 1
 
         if was_training:
             model.train()
-        if loss_was_training:
-            loss_model.train()
+        self.loss_model.train()
 
         mean_loss = total_loss / max(total_batches, 1)
-        if output_path:
+
+        if _is_main_process():
             print(
-                f"Validation Loss on {self.name}: {mean_loss:.6f} "
-                f"(epoch={epoch}, steps={steps})"
+                f"[{self.name}] loss={mean_loss:.6f}  epoch={epoch}  steps={steps}"
             )
+
+            if output_path is not None:
+                csv_path = Path(output_path) / f"{self.name}_results.csv"
+                write_header = not csv_path.exists()
+                with open(csv_path, "a", newline="", encoding="utf-8") as f:
+                    writer = csv.DictWriter(
+                        f, fieldnames=["epoch", "steps", self.primary_metric]
+                    )
+                    if write_header:
+                        writer.writeheader()
+                    writer.writerow(
+                        {
+                            "epoch": epoch,
+                            "steps": steps,
+                            self.primary_metric: f"{mean_loss:.6f}",
+                        }
+                    )
 
         return {self.primary_metric: mean_loss}

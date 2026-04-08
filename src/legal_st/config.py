@@ -12,7 +12,7 @@ class ExperimentConfig:
     run_name: str
     model_name: str
     output_dir: str
-    train_dataset: str = "batmangiaicuuthegioi/zalo-legal-triplets"
+    train_dataset: str | list[str] = "batmangiaicuuthegioi/zalo-legal-triplets"
     train_split: str = "train"
     eval_dataset: str = "another-symato/VMTEB-Zalo-legel-retrieval"
     eval_corpus_config: str = "corpus"
@@ -37,6 +37,7 @@ class ExperimentConfig:
     evaluation_steps: int = 250
     checkpoint_save_steps: int = 250
     checkpoint_save_total_limit: int = 2
+    early_stopping_patience: int | None = None
     hf_repo_id: str | None = None
     hf_private: bool = False
     hf_push_on_save: bool = False
@@ -46,8 +47,15 @@ class ExperimentConfig:
     matryoshka_dims: list[int] = field(default_factory=list)
     truncate_dims: list[int] = field(default_factory=list)
     top_k: list[int] = field(default_factory=lambda: [1, 3, 5, 10])
+    recall_at_k: list[int] = field(default_factory=lambda: [5, 10, 100])
     map_at_k: int = 100
     eval_batch_size: int = 128
+    # List of extra retrieval eval dataset specs. Each entry is a dict with keys:
+    #   dataset, name (optional), corpus_config, queries_config, labels_config,
+    #   split, and optional column-name overrides (see data.py for full list).
+    # When non-empty, these datasets are used for post-training retrieval eval
+    # instead of (or in addition to) the single eval_dataset field.
+    eval_datasets: list[dict] = field(default_factory=list)
 
     @property
     def output_path(self) -> Path:

@@ -9,6 +9,7 @@ import threading
 from pathlib import Path
 
 import torch
+from datasets import Dataset
 from huggingface_hub import HfApi
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -19,6 +20,13 @@ if str(SRC) not in sys.path:
 from sentence_transformers import losses
 from sentence_transformers import SentenceTransformer
 from sentence_transformers.datasets import NoDuplicatesDataLoader
+from sentence_transformers.fit_mixin import SaveModelCallback
+from sentence_transformers.trainer import SentenceTransformerTrainer
+from sentence_transformers.training_args import (
+    BatchSamplers,
+    SentenceTransformerTrainingArguments,
+)
+from transformers import TrainerCallback, TrainerControl, TrainerState
 from legal_st.config import dump_config, load_config
 from legal_st.data import (
     load_triplet_records,
@@ -28,12 +36,76 @@ from legal_st.data import (
 from legal_st.evaluation import LossEvaluator
 from legal_st.modeling import build_sentence_transformer
 from legal_st.retrieval import (
-    evaluate_dense_retrieval,
+    evaluate_dense_retrieval_datasets,
     results_to_markdown,
     results_to_readme,
-    write_results_artifacts,
+    write_multi_results_artifacts,
 )
 from legal_st.utils import ensure_dir, set_seed
+
+
+class EarlyStoppingCallback(TrainerCallback):
+    """Stop training when eval metric stops improving for *patience* evaluations."""
+
+    def __init__(self, patience: int, primary_metric: str, greater_is_better: bool = False) -> None:
+        self.patience = patience
+        self.primary_metric = primary_metric
+        self.greater_is_better = greater_is_better
+        self._best: float | None = None
+        self._wait: int = 0
+
+    def on_evaluate(
+        self,
+        args: SentenceTransformerTrainingArguments,
+        state: TrainerState,
+        control: TrainerControl,
+        metrics: dict,
+        **kwargs,
+    ) -> None:
+        key = f"eval_{self.primary_metric}"
+        score = metrics.get(key)
+        if score is None:
+            return
+
+        improved = (
+            self._best is None
+            or (self.greater_is_better and score > self._best)
+            or (not self.greater_is_better and score < self._best)
+        )
+
+        if improved:
+            self._best = score
+            self._wait = 0
+        else:
+            self._wait += 1
+            log(
+                f"[EarlyStopping] No improvement for {self._wait}/{self.patience} evals "
+                f"(best {key}={self._best:.6f}, current={score:.6f})"
+            )
+            if self._wait >= self.patience:
+                log(f"[EarlyStopping] Triggered — stopping training.")
+                control.should_training_stop = True
+
+
+def dataloader_to_hf_dataset(dataloader: NoDuplicatesDataLoader) -> Dataset:
+    """Drain a NoDuplicatesDataLoader into a HuggingFace Dataset."""
+    original_collate = dataloader.collate_fn
+    dataloader.collate_fn = lambda batch: batch  # identity – keep InputExamples raw
+    texts_list: list[tuple[str, ...]] = []
+    labels_list: list[float] = []
+    for batch in dataloader:
+        for example in batch:
+            texts_list.append(tuple(example.texts))
+            labels_list.append(example.label)
+    dataloader.collate_fn = original_collate
+
+    n_texts = len(texts_list[0])
+    data: dict[str, list] = {
+        f"sentence_{i}": [t[i] for t in texts_list] for i in range(n_texts)
+    }
+    if set(labels_list) != {0}:
+        data["label"] = labels_list
+    return Dataset.from_dict(data)
 
 
 def get_rank() -> int:
@@ -58,7 +130,7 @@ def log(message: str) -> None:
 def run_post_train_retrieval_eval(output_dir: Path, config) -> None:
     eval_model = SentenceTransformer(str(output_dir))
     eval_model.max_seq_length = config.max_seq_length
-    rows = evaluate_dense_retrieval(
+    dataset_results = evaluate_dense_retrieval_datasets(
         model=eval_model,
         config=config,
         truncate_dims=config.truncate_dims,
@@ -66,18 +138,20 @@ def run_post_train_retrieval_eval(output_dir: Path, config) -> None:
         extra_corpus_docs=config.retrieval_eval_extra_corpus_docs,
     )
     eval_output_dir = output_dir / "retrieval_eval"
-    write_results_artifacts(
+    write_multi_results_artifacts(
         output_dir=eval_output_dir,
-        rows=rows,
+        dataset_results=dataset_results,
         config=config,
         model_path=str(output_dir),
     )
     readme_path = output_dir / "README.md"
     readme_path.write_text(
-        results_to_readme(rows, config, str(output_dir)),
+        results_to_readme(dataset_results, config, str(output_dir)),
         encoding="utf-8",
     )
-    log(results_to_markdown(rows, config))
+    for name, rows in dataset_results:
+        log(f"\n--- {name} ---")
+        log(results_to_markdown(rows, config))
     log(f"Saved retrieval evaluation to: {eval_output_dir}")
     log(f"Updated model card at: {readme_path}")
 
@@ -215,6 +289,9 @@ def main() -> None:
         args.hf_token or os.getenv("HF_TOKEN") or os.getenv("HUGGING_FACE_HUB_TOKEN")
     )
     hf_repo_id = args.hf_repo_id or config.hf_repo_id
+    if not hf_token:
+        hf_repo_id = None
+        log("No HF token found — HuggingFace Hub sync disabled.")
 
     if torch.cuda.is_available():
         torch.set_float32_matmul_precision("high")
@@ -290,9 +367,7 @@ def main() -> None:
     )
     checkpoint_dir = output_dir / "checkpoints"
     hub_sync = None
-    if is_main_process() and (config.hf_push_on_save or hf_repo_id is not None):
-        if hf_repo_id is None:
-            raise ValueError("hf_repo_id is required when Hugging Face sync is enabled")
+    if is_main_process() and hf_repo_id is not None:
         hub_sync = HubSync(
             repo_id=hf_repo_id,
             output_dir=output_dir,
@@ -310,26 +385,78 @@ def main() -> None:
     if os.getenv("LOCAL_RANK") is not None:
         log("Distributed mode: torchrun/DDP")
 
+    # Convert the NoDuplicatesDataLoader to a HuggingFace Dataset so that
+    # SentenceTransformerTrainer can handle batching, DDP sharding, and AMP.
+    train_dataset = dataloader_to_hf_dataset(train_dataloader)
+    log(f"Train dataset converted: {len(train_dataset):,} examples")
+
+    training_args = SentenceTransformerTrainingArguments(
+        output_dir=str(checkpoint_dir),
+        batch_sampler=BatchSamplers.NO_DUPLICATES,
+        per_device_train_batch_size=config.train_batch_size,
+        per_device_eval_batch_size=config.eval_batch_size,
+        num_train_epochs=config.num_train_epochs,
+        # Precision: honour the config field instead of conflating use_amp → fp16
+        bf16=(config.precision == "bf16"),
+        fp16=(config.precision == "fp16"),
+        warmup_steps=warmup_steps,
+        weight_decay=config.weight_decay,
+        learning_rate=config.learning_rate,
+        max_grad_norm=1.0,
+        eval_strategy="steps" if evaluator is not None else "no",
+        eval_steps=config.evaluation_steps if evaluator is not None else 0,
+        logging_strategy="steps",
+        logging_steps=50,
+        save_strategy="steps",
+        save_steps=config.checkpoint_save_steps,
+        save_total_limit=config.checkpoint_save_total_limit,
+        metric_for_best_model=(
+            f"eval_{evaluator.primary_metric}" if evaluator is not None else None
+        ),
+        greater_is_better=False,
+        load_best_model_at_end=False,
+        seed=config.seed,
+        disable_tqdm=False,
+        report_to="none",
+    )
+
+    callbacks = []
+    if evaluator is not None:
+        callbacks.append(SaveModelCallback(str(output_dir), evaluator, save_best_model=True))
+        if config.early_stopping_patience is not None:
+            callbacks.append(
+                EarlyStoppingCallback(
+                    patience=config.early_stopping_patience,
+                    primary_metric=evaluator.primary_metric,
+                    greater_is_better=evaluator.greater_is_better,
+                )
+            )
+            log(f"Early stopping: patience={config.early_stopping_patience} evals")
+
+    trainer = SentenceTransformerTrainer(
+        model=model,
+        args=training_args,
+        train_dataset=train_dataset,
+        loss=train_loss,
+        evaluator=evaluator,
+        callbacks=callbacks,
+    )
+
     try:
-        model.fit(
-            train_objectives=[(train_dataloader, train_loss)],
-            evaluator=evaluator,
-            epochs=config.num_train_epochs,
-            warmup_steps=warmup_steps,
-            optimizer_params={"lr": config.learning_rate},
-            weight_decay=config.weight_decay,
-            output_path=str(output_dir),
-            save_best_model=evaluator is not None,
-            use_amp=use_amp,
-            checkpoint_path=str(checkpoint_dir),
-            checkpoint_save_steps=config.checkpoint_save_steps,
-            checkpoint_save_total_limit=config.checkpoint_save_total_limit,
-            evaluation_steps=config.evaluation_steps if evaluator is not None else 0,
-            show_progress_bar=True,
-        )
+        trainer.train()
     finally:
         if hub_sync is not None:
             hub_sync.stop()
+
+    # Reload the best checkpoint saved by SaveModelCallback so that
+    # the in-memory model matches what is on disk (matters when early
+    # stopping fires or training overshoots the best eval step).
+    best_marker = output_dir / "modules.json"
+    if is_main_process() and best_marker.exists():
+        log("Reloading best model from output_dir into memory...")
+        best_state = SentenceTransformer(str(output_dir)).state_dict()
+        model.load_state_dict(best_state)
+        log("Best model reloaded.")
 
     if is_main_process() and config.run_retrieval_eval_after_train:
         log("Running retrieval evaluation on saved best/final model...")
