@@ -29,6 +29,7 @@ if str(SRC) not in sys.path:
 from sentence_transformers import SentenceTransformer
 
 from legal_st.config import ExperimentConfig, load_config
+from legal_st.utils import safe_max_seq_length
 from legal_st.retrieval import (
     evaluate_dense_retrieval_datasets,
     results_to_markdown,
