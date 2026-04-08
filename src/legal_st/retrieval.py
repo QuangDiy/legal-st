@@ -63,6 +63,7 @@ def _run_metrics(
     model: SentenceTransformer,
     config: ExperimentConfig,
     truncate_dims: list[int] | None,
+    batch_size: int | None = None,
 ) -> list[dict[str, float | int]]:
     corpus_ids = list(corpus)
     corpus_texts = [corpus[doc_id] for doc_id in corpus_ids]
@@ -72,6 +73,7 @@ def _run_metrics(
     if truncate_dims is None or not truncate_dims:
         truncate_dims = [model.get_sentence_embedding_dimension()]
 
+    effective_batch_size = batch_size if batch_size is not None else config.eval_batch_size
     recall_ks: list[int] = list(config.recall_at_k) if config.recall_at_k else [5, 10, 100]
     max_k = max(max(config.top_k), config.map_at_k, *recall_ks)
     rows: list[dict[str, float | int]] = []
@@ -82,14 +84,14 @@ def _run_metrics(
 
         query_embeddings = model.encode(
             query_texts,
-            batch_size=config.eval_batch_size,
+            batch_size=effective_batch_size,
             convert_to_tensor=True,
             normalize_embeddings=True,
             show_progress_bar=True,
         )
         corpus_embeddings = model.encode(
             corpus_texts,
-            batch_size=config.eval_batch_size,
+            batch_size=effective_batch_size,
             convert_to_tensor=True,
             normalize_embeddings=True,
             show_progress_bar=True,
@@ -188,7 +190,8 @@ def evaluate_dense_retrieval(
         )
 
     effective_dims = truncate_dims if truncate_dims is not None else config.truncate_dims
-    return _run_metrics(corpus, queries, qrels, model, config, effective_dims)
+    spec_batch_size = int(dataset_spec["eval_batch_size"]) if dataset_spec and "eval_batch_size" in dataset_spec else None
+    return _run_metrics(corpus, queries, qrels, model, config, effective_dims, batch_size=spec_batch_size)
 
 
 def evaluate_dense_retrieval_datasets(

@@ -76,4 +76,5 @@ recall_at_k:
   - 100
 
 map_at_k: 100
-eval_batch_size: 128
+eval_batch_size: 32
+# 128 is the default batch size for the model
