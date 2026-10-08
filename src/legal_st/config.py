@@ -29,10 +29,20 @@ class ExperimentConfig:
     learning_rate: float = 2e-5
     warmup_ratio: float = 0.1
     weight_decay: float = 0.01
+    # "auto" resolves at runtime: bf16 on Ampere+ GPUs, fp16 on older GPUs (T4), fp32 on CPU.
     precision: str = "bf16"
+    # "auto" uses flash_attention_2 when the GPU (Ampere+), flash_attn and the
+    # architecture all support it, otherwise sdpa.
+    attn_implementation: str = "auto"
     use_amp: bool = True
     use_cached_mnrl: bool = False
+    cached_mnrl_mini_batch_size: int = 32
+    # Share in-batch negatives across GPUs under DDP (torchrun).
+    gather_across_devices: bool = False
     validation_size: float = 0.05
+    # Column used to group rows before the train/validation split. Use "positive"
+    # when several queries share one positive document, so it never leaks.
+    validation_group_key: str = "query"
     validation_subset: int | None = 1024
     evaluation_steps: int = 250
     checkpoint_save_steps: int = 250
@@ -42,6 +52,7 @@ class ExperimentConfig:
     hf_private: bool = False
     hf_push_on_save: bool = False
     run_retrieval_eval_after_train: bool = True
+    run_bm25_baseline: bool = True
     retrieval_eval_limit_queries: int | None = None
     retrieval_eval_extra_corpus_docs: int | None = None
     matryoshka_dims: list[int] = field(default_factory=list)
@@ -76,10 +87,20 @@ def load_config(path: str | Path) -> ExperimentConfig:
 
     config = ExperimentConfig(**payload)
     config.precision = config.precision.lower()
-    if config.precision not in {"fp32", "fp16", "bf16"}:
+    if config.precision not in {"auto", "fp32", "fp16", "bf16"}:
         raise ValueError(
             f"Unsupported precision in {config_path}: {config.precision}. "
-            "Expected one of: fp32, fp16, bf16"
+            "Expected one of: auto, fp32, fp16, bf16"
+        )
+    if config.attn_implementation not in {"auto", "flash_attention_2", "sdpa", "eager"}:
+        raise ValueError(
+            f"Unsupported attn_implementation in {config_path}: {config.attn_implementation}. "
+            "Expected one of: auto, flash_attention_2, sdpa, eager"
+        )
+    if config.validation_group_key not in {"query", "positive"}:
+        raise ValueError(
+            f"Unsupported validation_group_key in {config_path}: {config.validation_group_key}. "
+            "Expected one of: query, positive"
         )
 
     if not config.truncate_dims:

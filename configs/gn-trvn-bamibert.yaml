@@ -1,0 +1,80 @@
+# Fine-tune BamiBERT on GreenNode-Table-Markdown-Retrieval-VN (GN-TRVN) with
+# Matryoshka + CachedMNRL, evaluated like the GreenNode-Embedding model card.
+#
+# Prerequisite: run notebooks/mine_gn_trvn_negatives.ipynb (writes data/gn-trvn-hard-negatives)
+# 1x RTX 4090: python scripts/train_embedding.py --config configs/gn-trvn-bamibert.yaml
+# 2x T4:       torchrun --nproc_per_node 2 scripts/train_embedding.py --config configs/gn-trvn-bamibert.yaml
+run_name: gn-trvn-bamibert
+model_name: Qualcomm-AI-Research/BamiBERT
+output_dir: outputs/gn-trvn-bamibert
+
+train_dataset: data/gn-trvn-hard-negatives
+train_split: train
+
+eval_datasets:
+  - dataset: GreenNode/GreenNode-Table-Markdown-Retrieval-VN
+    name: GN-TRVN
+    corpus_config: corpus
+    queries_config: queries
+    labels_config: qrels
+    split: test
+    corpus_title_col: __no_title__  # every title is the literal string "None"
+  - dataset: GreenNode/zalo-ai-legal-text-retrieval-vn
+    name: Zalo-Legal
+    corpus_config: corpus
+    queries_config: queries
+    labels_config: qrels
+    split: test
+  - dataset: mteb/VieQuADRetrieval  # MTEB VieQuADRetrieval: 2,048 queries, 2 relevant docs each
+    name: VieQuADRetrieval
+    corpus_config: corpus
+    queries_config: queries
+    labels_config: qrels
+    split: validation
+
+seed: 42
+# GN-TRVN documents are at most ~750 tokens, so 1024 never truncates them.
+max_seq_length: 1024
+pooling: mean
+normalize_embeddings: true
+include_hard_negatives: true
+
+# auto: bf16 + FlashAttention-2 on the 4090 (ModernBERT only; RoBERTa falls
+# back to sdpa), fp16 + sdpa on T4.
+precision: auto
+attn_implementation: auto
+
+num_train_epochs: 3
+# Per-device contrastive batch. CachedMNRL bounds memory by the mini batch,
+# so the same value fits a 16 GB T4 and a 24 GB 4090.
+train_batch_size: 64
+use_cached_mnrl: true
+cached_mnrl_mini_batch_size: 16
+gather_across_devices: false
+learning_rate: 5.0e-5
+warmup_ratio: 0.1
+weight_decay: 0.01
+use_amp: true
+
+validation_size: 0.02
+validation_group_key: positive  # ~4 queries share each table; keep them on one side
+validation_subset: 2048
+evaluation_steps: 500
+checkpoint_save_steps: 500
+checkpoint_save_total_limit: 3
+early_stopping_patience: 4
+hf_repo_id: null
+hf_private: false
+run_retrieval_eval_after_train: true
+run_bm25_baseline: false  # rank_bm25 is too slow for 35,791 GN-TRVN queries
+retrieval_eval_limit_queries: null
+retrieval_eval_extra_corpus_docs: null
+
+matryoshka_dims: [768, 512, 256, 128]
+truncate_dims: [768, 512, 256, 128]
+
+# Same cutoffs as the GreenNode model card: MAP/MRR/NDCG/Recall@5 + Hit Rate@1/5/10/20.
+top_k: [1, 5, 10, 20]
+recall_at_k: [5]
+map_at_k: 5
+eval_batch_size: 32

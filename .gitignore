@@ -11,3 +11,4 @@ dist/
 outputs/
 results/
 .DS_Store
+data/

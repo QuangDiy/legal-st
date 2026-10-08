@@ -377,10 +377,8 @@ def results_to_markdown(
 
     table_rows = []
     for row in rows:
-        is_bm25 = row.get("truncate_dim") == -1
-        prefix = "bm25" if is_bm25 else "cosine"
-        label = "BM25" if is_bm25 else str(int(row["truncate_dim"]))
-        cells = [label]
+        prefix = "bm25" if row.get("truncate_dim") == -1 else "cosine"
+        cells = [row_label(row)]
         cells += [_fmt(row.get(f"{prefix}_accuracy@{k}", 0.0)) for k in config.top_k]
         cells += [_fmt(row.get(f"{prefix}_ndcg@{k}", 0.0)) for k in config.top_k if k != 1]
         cells += [_fmt(row.get(f"{prefix}_mrr@{k}", 0.0)) for k in config.top_k if k != 1]
@@ -389,6 +387,54 @@ def results_to_markdown(
         table_rows.append(cells)
 
     return tabulate(table_rows, headers=headers, tablefmt="github")
+
+
+def row_label(row: dict[str, float | int]) -> str:
+    return "BM25" if row.get("truncate_dim") == -1 else str(int(row["truncate_dim"]))
+
+
+def benchmark_metrics(
+    row: dict[str, float | int], k: int, hit_ks: list[int]
+) -> dict[str, float | None]:
+    """Metrics in the layout of the GreenNode / MTEB model cards (0-1 scale).
+
+    ``Mean`` averages MAP, MRR, NDCG and Recall at *k*; it is None when any of
+    them was not computed (e.g. ``map_at_k`` differs from *k*).
+    """
+    prefix = "bm25" if row.get("truncate_dim") == -1 else "cosine"
+    metrics: dict[str, float | None] = {
+        f"MAP@{k}": row.get(f"{prefix}_map@{k}"),
+        f"MRR@{k}": row.get(f"{prefix}_mrr@{k}"),
+        f"NDCG@{k}": row.get(f"{prefix}_ndcg@{k}"),
+        f"Recall@{k}": row.get(f"{prefix}_recall@{k}"),
+    }
+    core = list(metrics.values())
+    metrics["Mean"] = None if None in core else sum(core) / len(core)
+    for hit_k in hit_ks:
+        metrics[f"HitRate@{hit_k}"] = row.get(f"{prefix}_accuracy@{hit_k}")
+    return metrics
+
+
+def benchmark_to_markdown(
+    labelled_rows: list[tuple[str, dict[str, float | int]]], k: int, hit_ks: list[int]
+) -> str:
+    """Render benchmark_metrics for each (label, row) pair, scaled to 0-100."""
+    headers = ["method"] + list(benchmark_metrics({}, k, hit_ks))
+    table_rows = []
+    for label, row in labelled_rows:
+        values = benchmark_metrics(row, k, hit_ks).values()
+        table_rows.append(
+            [label] + ["-" if v is None else f"{float(v) * 100:.2f}" for v in values]
+        )
+    return tabulate(table_rows, headers=headers, tablefmt="github")
+
+
+def results_to_benchmark_markdown(
+    rows: list[dict[str, float | int]], config: ExperimentConfig
+) -> str:
+    return benchmark_to_markdown(
+        [(row_label(row), row) for row in rows], config.map_at_k, list(config.top_k)
+    )
 
 
 def write_results_artifacts(
@@ -407,7 +453,13 @@ def write_results_artifacts(
         "results": rows,
     }
     save_json(payload, output_path / "results.json")
-    markdown = results_to_markdown(rows, config)
+    markdown = "\n\n".join(
+        [
+            results_to_markdown(rows, config),
+            "Benchmark (x100, GreenNode/MTEB layout):",
+            results_to_benchmark_markdown(rows, config),
+        ]
+    )
     (output_path / "results.md").write_text(markdown + "\n", encoding="utf-8")
 
 
@@ -443,7 +495,7 @@ def results_to_readme(
     lines = [
         "# " + Path(model_path).name,
         "",
-        "SentenceTransformer checkpoint fine-tuned for Vietnamese legal retrieval.",
+        "SentenceTransformer checkpoint fine-tuned for Vietnamese retrieval.",
         "",
         "## Evaluation",
         "",
@@ -455,6 +507,10 @@ def results_to_readme(
             f"### {name}",
             "",
             results_to_markdown(rows, config),
+            "",
+            "Benchmark (x100, GreenNode/MTEB layout):",
+            "",
+            results_to_benchmark_markdown(rows, config),
             "",
         ]
     return "\n".join(lines)

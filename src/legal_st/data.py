@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import random
+import re
 from collections import defaultdict
 from typing import Iterable
 
@@ -11,14 +12,25 @@ from .config import ExperimentConfig
 from .utils import normalize_text
 
 
-def _trim_triplet_row(row: dict, include_hard_negatives: bool) -> dict[str, str]:
+_NEGATIVE_COLUMN = re.compile(r"^negative(_\d+)?$")
+
+
+def _negative_columns(column_names: list[str]) -> list[str]:
+    """Return "negative" and/or "negative_1".."negative_n" columns in numeric order."""
+    matched = [name for name in column_names if _NEGATIVE_COLUMN.match(name)]
+    return sorted(matched, key=lambda name: int(name.rsplit("_", 1)[1]) if "_" in name else 0)
+
+
+def _trim_triplet_row(
+    row: dict, negative_columns: list[str], include_hard_negatives: bool
+) -> dict[str, str]:
     payload = {
         "query": normalize_text(row["query"]),
         "positive": normalize_text(row["positive"]),
-        "negative": normalize_text(row["negative"]),
     }
-    if not include_hard_negatives:
-        payload.pop("negative")
+    if include_hard_negatives:
+        for name in negative_columns:
+            payload[name] = normalize_text(row[name])
     return payload
 
 
@@ -26,8 +38,13 @@ def _load_one_triplet_dataset(
     dataset_id: str, split: str, include_hard_negatives: bool
 ) -> list[dict[str, str]]:
     dataset = load_dataset(dataset_id, split=split)
+    negative_columns = _negative_columns(dataset.column_names)
     return [
-        _trim_triplet_row(row, include_hard_negatives=include_hard_negatives)
+        _trim_triplet_row(
+            row,
+            negative_columns=negative_columns,
+            include_hard_negatives=include_hard_negatives,
+        )
         for row in dataset
     ]
 
@@ -51,13 +68,14 @@ def split_records_by_query(
     records: list[dict[str, str]],
     validation_size: float,
     seed: int,
+    group_key: str = "query",
 ) -> tuple[list[dict[str, str]], list[dict[str, str]]]:
     if validation_size <= 0:
         return records, []
 
     grouped: dict[str, list[dict[str, str]]] = defaultdict(list)
     for row in records:
-        grouped[row["query"]].append(row)
+        grouped[row[group_key]].append(row)
 
     queries = list(grouped)
     rng = random.Random(seed)
@@ -81,8 +99,7 @@ def records_to_input_examples(records: Iterable[dict[str, str]]) -> list[InputEx
     examples: list[InputExample] = []
     for row in records:
         texts = [row["query"], row["positive"]]
-        if "negative" in row:
-            texts.append(row["negative"])
+        texts.extend(row[name] for name in _negative_columns(list(row)))
         examples.append(InputExample(texts=texts))
     return examples
 

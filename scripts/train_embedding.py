@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import argparse
-import math
 import os
 import shutil
 import sys
@@ -34,14 +33,15 @@ from legal_st.data import (
     split_records_by_query,
 )
 from legal_st.evaluation import LossEvaluator
-from legal_st.modeling import build_sentence_transformer
+from legal_st.modeling import build_sentence_transformer, load_sentence_transformer
 from legal_st.retrieval import (
     evaluate_dense_retrieval_datasets,
+    results_to_benchmark_markdown,
     results_to_markdown,
     results_to_readme,
     write_multi_results_artifacts,
 )
-from legal_st.utils import ensure_dir, safe_max_seq_length, set_seed
+from legal_st.utils import ensure_dir, resolve_precision, safe_max_seq_length, set_seed
 
 
 class EarlyStoppingCallback(TrainerCallback):
@@ -128,7 +128,7 @@ def log(message: str) -> None:
 
 
 def run_post_train_retrieval_eval(output_dir: Path, config) -> None:
-    eval_model = SentenceTransformer(str(output_dir))
+    eval_model = load_sentence_transformer(str(output_dir), config.attn_implementation)
     eval_model.max_seq_length = min(config.max_seq_length, safe_max_seq_length(eval_model))
     dataset_results = evaluate_dense_retrieval_datasets(
         model=eval_model,
@@ -136,6 +136,7 @@ def run_post_train_retrieval_eval(output_dir: Path, config) -> None:
         truncate_dims=config.truncate_dims,
         limit_queries=config.retrieval_eval_limit_queries,
         extra_corpus_docs=config.retrieval_eval_extra_corpus_docs,
+        run_bm25=config.run_bm25_baseline,
     )
     eval_output_dir = output_dir / "retrieval_eval"
     write_multi_results_artifacts(
@@ -152,6 +153,7 @@ def run_post_train_retrieval_eval(output_dir: Path, config) -> None:
     for name, rows in dataset_results:
         log(f"\n--- {name} ---")
         log(results_to_markdown(rows, config))
+        log(results_to_benchmark_markdown(rows, config))
     log(f"Saved retrieval evaluation to: {eval_output_dir}")
     log(f"Updated model card at: {readme_path}")
 
@@ -279,6 +281,7 @@ class HubSync:
 def main() -> None:
     args = parse_args()
     config = load_config(args.config)
+    config.precision = resolve_precision(config.precision)
     set_seed(config.seed)
 
     local_rank = get_local_rank()
@@ -314,6 +317,7 @@ def main() -> None:
         records,
         validation_size=config.validation_size,
         seed=config.seed,
+        group_key=config.validation_group_key,
     )
 
     log(f"Loaded {len(records):,} triplets from {config.train_dataset}")
@@ -325,6 +329,7 @@ def main() -> None:
         max_seq_length=config.max_seq_length,
         pooling=config.pooling,
         normalize_embeddings=config.normalize_embeddings,
+        attn_implementation=config.attn_implementation,
     )
 
     train_examples = records_to_input_examples(train_records)
@@ -332,10 +337,18 @@ def main() -> None:
         train_examples, batch_size=config.train_batch_size
     )
 
+    # CachedMNRL (GradCache) keeps memory bounded by mini_batch_size, so the
+    # contrastive batch can stay large on 16 GB cards.
     inner_loss = (
-        losses.CachedMultipleNegativesRankingLoss(model)
+        losses.CachedMultipleNegativesRankingLoss(
+            model,
+            mini_batch_size=config.cached_mnrl_mini_batch_size,
+            gather_across_devices=config.gather_across_devices,
+        )
         if config.use_cached_mnrl
-        else losses.MultipleNegativesRankingLoss(model)
+        else losses.MultipleNegativesRankingLoss(
+            model, gather_across_devices=config.gather_across_devices
+        )
     )
     train_loss = (
         losses.MatryoshkaLoss(model, inner_loss, matryoshka_dims=config.matryoshka_dims)
@@ -362,9 +375,6 @@ def main() -> None:
             batch_size=config.eval_batch_size,
         )
 
-    warmup_steps = math.ceil(
-        len(train_dataloader) * config.num_train_epochs * config.warmup_ratio
-    )
     checkpoint_dir = output_dir / "checkpoints"
     hub_sync = None
     if is_main_process() and hf_repo_id is not None:
@@ -377,9 +387,12 @@ def main() -> None:
         )
         hub_sync.start()
 
-    log(f"Warmup steps: {warmup_steps}")
+    log(f"Warmup ratio: {config.warmup_ratio}")
     log(f"Output dir: {output_dir}")
     log(f"Precision: {config.precision}")
+    log(f"Loss: {'CachedMNRL' if config.use_cached_mnrl else 'MNRL'} "
+        f"(gather_across_devices={config.gather_across_devices}), "
+        f"Matryoshka dims: {config.matryoshka_dims or 'off'}")
     if hf_repo_id is not None:
         log(f"HF repo: {hf_repo_id}")
     if os.getenv("LOCAL_RANK") is not None:
@@ -399,7 +412,8 @@ def main() -> None:
         # Precision: honour the config field instead of conflating use_amp → fp16
         bf16=(config.precision == "bf16"),
         fp16=(config.precision == "fp16"),
-        warmup_steps=warmup_steps,
+        # A ratio (not a step count) stays correct when torchrun shards the data.
+        warmup_ratio=config.warmup_ratio,
         weight_decay=config.weight_decay,
         learning_rate=config.learning_rate,
         max_grad_norm=1.0,

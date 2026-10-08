@@ -30,6 +30,15 @@ def set_seed(seed: int) -> None:
         torch.cuda.manual_seed_all(seed)
 
 
+def resolve_precision(precision: str) -> str:
+    """Map "auto" to bf16 on Ampere+ GPUs, fp16 on older GPUs (e.g. T4), fp32 on CPU."""
+    if precision != "auto":
+        return precision
+    if not torch.cuda.is_available():
+        return "fp32"
+    return "bf16" if torch.cuda.get_device_capability()[0] >= 8 else "fp16"
+
+
 def normalize_text(text: str) -> str:
     return " ".join(str(text).split())
 
