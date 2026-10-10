@@ -27,6 +27,7 @@ eval_datasets:
     split: test
   - dataset: mteb/VieQuADRetrieval  # MTEB VieQuADRetrieval: 2,048 queries, 2 relevant docs each
     name: VieQuADRetrieval
+    format: beir_files
     corpus_config: corpus
     queries_config: queries
     labels_config: qrels

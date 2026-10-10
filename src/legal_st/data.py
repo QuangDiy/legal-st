@@ -154,10 +154,25 @@ def _build_retrieval_splits(
     qrel_score_col: str,
     limit_queries: int | None,
     extra_corpus_docs: int | None,
+    component_files: bool = False,
 ) -> tuple[dict[str, str], dict[str, str], dict[str, dict[str, int]]]:
-    corpus_rows = load_dataset(dataset_id, corpus_config, split=split)
-    query_rows = load_dataset(dataset_id, queries_config, split=split)
-    qrel_rows = load_dataset(dataset_id, labels_config, split=split)
+    if component_files:
+        # Some MTEB repositories retain the BEIR folders but no longer declare
+        # corpus/queries/qrels as named dataset configs in their card metadata.
+        def load_component(folder: str):
+            return load_dataset(
+                dataset_id,
+                data_files={split: f"{folder}/{split}-*.parquet"},
+                split=split,
+            )
+
+        corpus_rows = load_component(corpus_config)
+        query_rows = load_component(queries_config)
+        qrel_rows = load_component(labels_config)
+    else:
+        corpus_rows = load_dataset(dataset_id, corpus_config, split=split)
+        query_rows = load_dataset(dataset_id, queries_config, split=split)
+        qrel_rows = load_dataset(dataset_id, labels_config, split=split)
 
     # Auto-detect column names using aliases when the configured name is absent
     q_keys = query_rows.column_names
@@ -302,6 +317,7 @@ def load_retrieval_dataset_from_spec(
     Required key: ``dataset``.
     Optional ``format`` key selects the loader:
       - ``"beir"`` (default): separate corpus / queries / qrels configs.
+      - ``"beir_files"``: separate corpus / queries / qrels Parquet folders.
       - ``"squad"``: single split with context + question columns (SQuAD-style).
 
     BEIR optional keys (with defaults):
@@ -344,6 +360,7 @@ def load_retrieval_dataset_from_spec(
         qrel_score_col=spec.get("qrel_score_col", "score"),
         limit_queries=limit_queries,
         extra_corpus_docs=extra_corpus_docs,
+        component_files=fmt == "beir_files",
     )
 
 
