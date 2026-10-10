@@ -64,7 +64,7 @@ evaluation_steps: 2000
 checkpoint_save_steps: 2000
 checkpoint_save_total_limit: 3
 early_stopping_patience: 3
-shf_repo_id: null
+hf_repo_id: null
 hf_private: false
 run_retrieval_eval_after_train: true
 run_bm25_baseline: false  # rank_bm25 is too slow for 35,791 GN-TRVN queries
