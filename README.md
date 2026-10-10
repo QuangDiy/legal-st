@@ -160,6 +160,15 @@ GPU memory; reduce the batch size if needed.
    saved in `outputs/gn-trvn-bert-base-stage2/README.md` and in each dataset's
    `retrieval_eval/<dataset>/results.md`, then uploaded with the model to Hugging Face.
 
+   If post-training evaluation stops after the model is saved, run the standalone
+   evaluator with that model path and the same config. This repeats evaluation
+   only; it does not restart training:
+
+   ```bash
+   python scripts/evaluate_retrieval.py --config configs/gn-trvn-bert-base-stage2.yaml \
+     --model-path outputs/gn-trvn-bert-base-stage2 --no-bm25
+   ```
+
 3. Evaluate reference models with the same config, then compare:
 
    ```bash
