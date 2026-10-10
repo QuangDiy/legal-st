@@ -96,35 +96,69 @@ GN-TRVN, Zalo Legal and MTEB VieQuADRetrieval.
 GPU environment (Python 3.11, PyTorch 2.4.0 + CUDA 12.4, transformers 4.57.1):
 
 ```bash
+git clone https://github.com/QuangDiy/legal-st.git
+cd legal-st
 conda env create -f environment-fa2.yml
 conda activate legal-st-fa2
 pip install "flash_attn==2.6.3" --no-build-isolation   # RTX 4090 only; skip on T4
 ```
 
+In the same shell, paste a Hugging Face token with write permission at the prompt:
+
+```bash
+read -rsp "HF token: " HF_TOKEN; echo
+export HF_TOKEN
+```
+
 `precision: auto` and `attn_implementation: auto` pick bf16 + FlashAttention-2 on
 Ampere-or-newer GPUs and fp16 + sdpa on T4. FlashAttention-2 only applies to the
 ModernBERT models; BamiBERT (RoBERTa) always runs sdpa.
+The GN-TRVN configs set `max_seq_length` to each model's context limit: 4096 for
+both ModernBERT stage2 models and 2048 for BamiBERT. Longer inputs may use more
+GPU memory; reduce the batch size if needed.
 
 1. Mine hard negatives from the train split (train documents only, no test leakage)
    by running `notebooks/mine_gn_trvn_negatives.ipynb` from the `notebooks/` folder.
    Parameters sit in its first code cell (default: `BAAI/bge-m3`, 3 negatives). It writes
-   `data/gn-trvn-hard-negatives/train.parquet` (at most 143,106 rows) and
-   `mining_args.json` with the final row count and file size. On Kaggle (GPU T4 x2,
-   Internet on, `HF_TOKEN` secret) the notebook installs the pinned libraries, clones
-   the repo, encodes on both GPUs and writes to `/kaggle/working/data/gn-trvn-hard-negatives`.
+   `data/gn-trvn-hard-negatives/train.parquet` with one `(query, positive, negative)`
+   triplet per row and
+   `mining_args.json` with the final row count, dropped count and file size. It retries
+   queries with fewer than three valid negatives against a wider train-only candidate pool, then
+   preserves one output row per valid negative for each qrel. On Kaggle (GPU T4 x2,
+   Internet on, `HF_TOKEN` secret with write access) the notebook installs the pinned
+   libraries, clones the repo, encodes on both GPUs and writes to
+   `/kaggle/working/data/gn-trvn-hard-negatives`. Its final cell uploads the dataset
+   to `QuangDuy/gn-trvn-hard-negatives` on Hugging Face when `HUB_REPO_ID` is set.
+
+   If that dataset is already on Hugging Face, download it into the local path
+   expected by the training config instead of rerunning the notebook:
+
+   ```bash
+   python -c 'from pathlib import Path; from datasets import load_dataset; p = Path("data/gn-trvn-hard-negatives"); p.mkdir(parents=True, exist_ok=True); load_dataset("QuangDuy/gn-trvn-hard-negatives", split="train").to_parquet(str(p / "train.parquet"))'
+   ```
 
 2. Train (each run ends with the retrieval evaluation in `outputs/<run>/retrieval_eval`):
 
    ```bash
-   # 1x RTX 4090
-   python scripts/train_embedding.py --config configs/gn-trvn-bert-base-stage2.yaml
+   # 1x RTX 4090 (replace the repo ID with your Hugging Face model repo).
+   python scripts/train_embedding.py \
+     --config configs/gn-trvn-bert-base-stage2.yaml \
+     --hf-repo-id QuangDuy/gn-trvn-bert-base-stage2
    # 2x T4
-   torchrun --nproc_per_node 2 scripts/train_embedding.py --config configs/gn-trvn-bert-base-stage2.yaml
+   torchrun --nproc_per_node 2 scripts/train_embedding.py \
+     --config configs/gn-trvn-bert-base-stage2.yaml \
+     --hf-repo-id QuangDuy/gn-trvn-bert-base-stage2
    ```
 
    Configs: `configs/gn-trvn-bert-tiny-stage2.yaml`, `configs/gn-trvn-bert-base-stage2.yaml`,
    `configs/gn-trvn-bamibert.yaml`. Lower `cached_mnrl_mini_batch_size` on out-of-memory;
    it changes memory use, not the loss.
+
+   Run only the command for your GPU setup. On the 4090, check the training log for
+   `[attention] using flash_attention_2`. After training, the script evaluates GN-TRVN
+   (`test`), Zalo-Legal (`test`) and VieQuADRetrieval (`validation`). The tables are
+   saved in `outputs/gn-trvn-bert-base-stage2/README.md` and in each dataset's
+   `retrieval_eval/<dataset>/results.md`, then uploaded with the model to Hugging Face.
 
 3. Evaluate reference models with the same config, then compare:
 

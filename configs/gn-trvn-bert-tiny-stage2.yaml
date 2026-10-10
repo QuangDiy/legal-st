@@ -33,8 +33,8 @@ eval_datasets:
     split: validation
 
 seed: 42
-# GN-TRVN documents are at most ~750 tokens, so 1024 never truncates them.
-max_seq_length: 1024
+# Match the ModernBERT stage2 model's 4096-token context window.
+max_seq_length: 4096
 pooling: mean
 normalize_embeddings: true
 include_hard_negatives: true
