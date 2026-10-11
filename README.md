@@ -172,14 +172,15 @@ GPU memory; reduce the batch size if needed.
 
 3. Evaluate reference models with the same config, then compare:
 
-   On Linux, run the reference models with live terminal output and one
-   `eval.log` per model:
+   On Linux, run the six reference models and the three `QuangDuy/gn-trvn-*`
+   models with live terminal output and one `eval.log` per model:
 
    ```bash
    ./scripts/evaluate_reference_models.sh
    ```
 
-   The script skips models whose `results.json` already exists. With the pinned
+   The script skips models whose `results.json` already exists and reports any
+   failures after trying the remaining models. With the pinned
    PyTorch 2.4.0 and Transformers 4.57.1, `keepitreal/vietnamese-sbert` cannot
    load its `.bin` checkpoint: Transformers requires PyTorch 2.6 or newer for
    that format. Evaluate that model in a separate environment with PyTorch 2.6.
@@ -195,6 +196,9 @@ GPU memory; reduce the batch size if needed.
      base=outputs/gn-trvn-bert-base-stage2/retrieval_eval \
      bamibert=outputs/gn-trvn-bamibert/retrieval_eval \
      greennode=results/gn-trvn/greennode-large \
+     quangduy-base=results/gn-trvn/gn-trvn-bert-base-stage2 \
+     quangduy-bamibert=results/gn-trvn/gn-trvn-bamibert \
+     quangduy-tiny=results/gn-trvn/gn-trvn-bert-tiny-stage2 \
      --dims all --output results/gn-trvn/comparison.md
    ```
 
