@@ -1,9 +1,10 @@
-# GPU environment: Python 3.11, PyTorch 2.6.0 + CUDA 12.4,
-# transformers 4.57.1, and optional FlashAttention-2.
+# GPU environment: Python 3.11, PyTorch 2.4.0 + CUDA 12.4,
+# transformers 4.57.1, and optional FlashAttention-2 2.6.3.
 #
 #   conda env create -f environment-fa2.yml
 #   conda activate legal-st-fa2
-#   pip install flash-attn --no-build-isolation  # optional; build against torch 2.6
+#   python -m pip uninstall -y flash-attn
+#   python -m pip install --no-cache-dir 'flash-attn==2.6.3' --no-build-isolation
 #
 # FlashAttention-2 needs an Ampere-or-newer GPU (RTX 4090: yes, T4: no). On T4
 # skip the flash_attn install; attn_implementation: auto then uses sdpa.

@@ -93,14 +93,15 @@ and report the same metrics as the
 model card: MAP/MRR/NDCG/Recall@5, their Mean, and Hit Rate@1/5/10/20 on
 GN-TRVN, Zalo Legal and MTEB VieQuADRetrieval.
 
-GPU environment (Python 3.11, PyTorch 2.6.0 + CUDA 12.4, transformers 4.57.1):
+GPU environment (Python 3.11, PyTorch 2.4.0 + CUDA 12.4, transformers 4.57.1):
 
 ```bash
 git clone https://github.com/QuangDiy/legal-st.git
 cd legal-st
 conda env create -f environment-fa2.yml
 conda activate legal-st-fa2
-pip install flash-attn --no-build-isolation   # RTX 4090 only; skip on T4
+python -m pip uninstall -y flash-attn
+python -m pip install --no-cache-dir 'flash-attn==2.6.3' --no-build-isolation  # RTX 4090 only; skip on T4
 ```
 
 In the same shell, paste a Hugging Face token with write permission at the prompt:
@@ -171,26 +172,17 @@ GPU memory; reduce the batch size if needed.
 
 3. Evaluate reference models with the same config, then compare:
 
-   On Linux, run all six reference models with live terminal output and one
+   On Linux, run the reference models with live terminal output and one
    `eval.log` per model:
 
    ```bash
    ./scripts/evaluate_reference_models.sh
    ```
 
-   The script skips models whose `results.json` already exists. An existing
-   `legal-st-fa2` environment created with PyTorch 2.4 must be upgraded before
-   evaluating `keepitreal/vietnamese-sbert`, whose checkpoint is a PyTorch `.bin`
-   file. Transformers requires PyTorch 2.6 or newer to load that format:
-
-   ```bash
-   conda run -n legal-st-fa2 python -m pip uninstall -y flash-attn
-   conda run -n legal-st-fa2 python -m pip install 'torch==2.6.0' --index-url https://download.pytorch.org/whl/cu124
-   ./scripts/evaluate_reference_models.sh
-   ```
-
-   If FlashAttention-2 is needed for other runs, install it again after the
-   PyTorch upgrade so its extension is built against the installed version.
+   The script skips models whose `results.json` already exists. With the pinned
+   PyTorch 2.4.0 and Transformers 4.57.1, `keepitreal/vietnamese-sbert` cannot
+   load its `.bin` checkpoint: Transformers requires PyTorch 2.6 or newer for
+   that format. Evaluate that model in a separate environment with PyTorch 2.6.
 
    ```bash
    python scripts/evaluate_retrieval.py --config configs/gn-trvn-bert-base-stage2.yaml \
