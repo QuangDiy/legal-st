@@ -11,6 +11,10 @@ result_root="${RESULT_ROOT:-results/gn-trvn}"
 # evaluation batch size, output directory name.
 while read -r model_id dim seq_length batch_size name; do
   output_dir="$result_root/$name"
+  if [[ -f "$output_dir/results.json" ]]; then
+    echo "=== Skipping $model_id: $output_dir/results.json already exists ==="
+    continue
+  fi
   mkdir -p "$output_dir"
 
   echo "=== Evaluating $model_id (length=$seq_length, dim=$dim, batch=$batch_size) ==="
