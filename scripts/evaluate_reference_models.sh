@@ -39,9 +39,9 @@ keepitreal/vietnamese-sbert 768 256 32 vietnamese-sbert
 bkai-foundation-models/vietnamese-bi-encoder 768 256 32 bkai-bi-encoder
 aisingapore/SEA-LION-ModernBERT-Embedding-600M 1024 8192 16 sealion-600m
 aisingapore/SEA-LION-ModernBERT-Embedding-300M 768 8192 32 sealion-300m
-QuangDuy/gn-trvn-bert-base-stage2 768 4096 2 gn-trvn-bert-base-stage2
-QuangDuy/gn-trvn-bamibert 768 2048 4 gn-trvn-bamibert
-QuangDuy/gn-trvn-bert-tiny-stage2 384 4096 8 gn-trvn-bert-tiny-stage2
+QuangDuy/gn-trvn-bert-base-stage2 768 4096 32 gn-trvn-bert-base-stage2
+QuangDuy/gn-trvn-bamibert 768 2048 16 gn-trvn-bamibert
+QuangDuy/gn-trvn-bert-tiny-stage2 384 4096 32 gn-trvn-bert-tiny-stage2
 MODELS
 
 if (( ${#failed_models[@]} )); then
