@@ -23,10 +23,10 @@ while read -r model_id dim seq_length batch_size name; do
     --no-bm25 \
     --output-dir "$output_dir" 2>&1 | tee "$output_dir/eval.log"
 done <<'MODELS'
-GreenNode/GreenNode-Embedding-Large-VN-V1 1024 8192 2 greennode-large
-VoVanPhuc/sup-SimCSE-VietNamese-phobert-base 768 256 8 simcse-phobert
-keepitreal/vietnamese-sbert 768 256 8 vietnamese-sbert
-bkai-foundation-models/vietnamese-bi-encoder 768 256 8 bkai-bi-encoder
-aisingapore/SEA-LION-ModernBERT-Embedding-600M 1024 8192 2 sealion-600m
-aisingapore/SEA-LION-ModernBERT-Embedding-300M 768 8192 2 sealion-300m
+GreenNode/GreenNode-Embedding-Large-VN-V1 1024 8192 16 greennode-large
+VoVanPhuc/sup-SimCSE-VietNamese-phobert-base 768 256 32 simcse-phobert
+keepitreal/vietnamese-sbert 768 256 32 vietnamese-sbert
+bkai-foundation-models/vietnamese-bi-encoder 768 256 32 bkai-bi-encoder
+aisingapore/SEA-LION-ModernBERT-Embedding-600M 1024 8192 16 sealion-600m
+aisingapore/SEA-LION-ModernBERT-Embedding-300M 768 8192 32 sealion-300m
 MODELS
