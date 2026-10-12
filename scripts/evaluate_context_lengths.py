@@ -1,4 +1,4 @@
-"""Controlled GN-TRVN retrieval evaluation over document token windows.
+"""Controlled GN-TRVN retrieval evaluation over maximum sequence lengths.
 
 Example:
     python scripts/evaluate_context_lengths.py \
@@ -7,7 +7,9 @@ Example:
       --output-dir results/gn-trvn/context-length-base
 
 The checkpoint, query embeddings, corpus, qrels, embedding dimension, and
-ranking procedure stay fixed. Only the document encoding window changes.
+ranking procedure stay fixed. Only the document max_seq_length changes.
+SentenceTransformer truncates each document to that length; no sliding windows
+or document splitting are used.
 """
 
 from __future__ import annotations
@@ -40,7 +42,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--dataset-name", default="GN-TRVN")
     parser.add_argument("--document-lengths", type=int, nargs="+", default=[512, 1024, 2048, 4096])
     parser.add_argument("--query-length", type=int, default=512,
-                        help="Fixed query window across all document-window runs")
+                        help="Fixed query max_seq_length across all document truncation runs")
     parser.add_argument("--batch-size", type=int, default=8)
     return parser.parse_args()
 
@@ -64,7 +66,9 @@ def query_groups(
     corpus_lengths: dict[str, int],
 ) -> tuple[dict[str, list[int]], dict[str, int]]:
     """Freeze length strata before evaluation using the relevant document length."""
-    groups = {name: [] for name in ("all", "le_512", "gt_512", "513_1024", "1025_2048", "gt_2048")}
+    groups = {name: [] for name in (
+        "all", "le_512", "513_1024", "1025_2048", "2049_4096", "gt_4096", "gt_512",
+    )}
     for index, query_id in enumerate(query_ids):
         relevant_lengths = [
             corpus_lengths[doc_id]
@@ -85,8 +89,10 @@ def query_groups(
                 groups["513_1024"].append(index)
             elif relevant_length <= 2048:
                 groups["1025_2048"].append(index)
+            elif relevant_length <= 4096:
+                groups["2049_4096"].append(index)
             else:
-                groups["gt_2048"].append(index)
+                groups["gt_4096"].append(index)
     return groups, {name: len(indices) for name, indices in groups.items()}
 
 
@@ -117,26 +123,27 @@ def summarize_hits(
 
 def markdown_report(payload: dict) -> str:
     lines = [
-        "# Controlled document-window retrieval evaluation",
+        "# Controlled max-sequence-length retrieval evaluation",
         "",
         f"Checkpoint: `{payload['model_path']}`  ",
         f"Dataset: `{payload['dataset']}` ({payload['split']})  ",
         f"Queries: {payload['n_queries']}; corpus documents: {payload['n_corpus']}  ",
-        f"Fixed query window: {payload['query_length']} tokens; full embedding dimension: {payload['embedding_dim']}  ",
-        "Only the document token window varies. The ranking corpus and query set are identical in every row.",
+        f"Fixed query max_seq_length: {payload['query_length']} tokens; full embedding dimension: {payload['embedding_dim']}  ",
+        "Each document is truncated to the indicated max_seq_length; no sliding windows are used. The ranking corpus and query set are identical in every row.",
         "",
-        "| Document window | Query group | Queries | MAP@5 | NDCG@5 | Recall@5 |",
+        "| Document max_seq_length | Query group | Queries | MAP@5 | NDCG@5 | Recall@5 |",
         "|---:|:---|---:|---:|---:|---:|",
     ]
-    for window, result in payload["results"].items():
+    for max_seq_length, result in payload["results"].items():
         for group, values in result.items():
             formatted = ["--" if values[key] is None else f"{100 * values[key]:.2f}"
                          for key in ("MAP@5", "NDCG@5", "Recall@5")]
-            lines.append(f"| {window} | {group} | {values['n_queries']} | " + " | ".join(formatted) + " |")
+            lines.append(f"| {max_seq_length} | {group} | {values['n_queries']} | " + " | ".join(formatted) + " |")
     lines.extend([
         "",
-        "Query groups are fixed using the untruncated token length of the longest relevant document.",
-        "`gt_512` is the primary long-document subgroup; bins are disjoint except for `all` and `gt_512`.",
+        "Length groups use this checkpoint's tokenizer, including special tokens, on the full test-set relevant documents before truncation.",
+        "The five length ranges are disjoint; `all` and `gt_512` are additional summaries. Group membership stays fixed across max_seq_length settings for this checkpoint.",
+        "For queries with multiple relevant documents, grouping uses the longest relevant document. Tokenizer-specific groups may differ between models.",
         "Scores are multiplied by 100. Empty groups are shown as `--`.",
         "",
     ])
@@ -149,7 +156,7 @@ def main() -> None:
     if len(set(lengths)) != len(lengths) or any(length <= 0 for length in lengths):
         raise ValueError("Document lengths must be unique positive integers")
     if args.query_length <= 0 or args.query_length > min(lengths):
-        raise ValueError("Query length must be positive and no greater than the shortest document window")
+        raise ValueError("Query length must be positive and no greater than the shortest document max_seq_length")
     if args.batch_size <= 0:
         raise ValueError("Batch size must be positive")
 
@@ -178,7 +185,7 @@ def main() -> None:
 
     model.max_seq_length = args.query_length
     if safe_max_seq_length(model) != args.query_length:
-        raise ValueError("The requested query window exceeds this model's positional limit")
+        raise ValueError("The requested query max_seq_length exceeds this model's positional limit")
     with torch.inference_mode():
         query_embeddings = model.encode(
             query_texts, batch_size=args.batch_size, convert_to_tensor=True,
@@ -195,21 +202,24 @@ def main() -> None:
         "n_queries": len(query_ids),
         "n_corpus": len(corpus_ids),
         "query_length": args.query_length,
-        "queries_over_query_window": sum(length > args.query_length for length in query_token_lengths),
+        "queries_over_query_limit": sum(length > args.query_length for length in query_token_lengths),
         "embedding_dim": embedding_dim,
         "batch_size": args.batch_size,
-        "document_lengths": lengths,
+        "document_max_seq_lengths": lengths,
         "corpus_documents_over_512": sum(length > 512 for length in corpus_lengths.values()),
         "group_sizes": group_sizes,
         "relevant_document_group_rule": "longest relevant document, full token length including special tokens",
         "results": {},
     }
+    print(f"Dataset: {args.dataset_name}, split: {spec.get('split', 'test')}; "
+          f"queries: {len(query_ids)}, corpus documents: {len(corpus_ids)}")
+    print(f"Full-length relevant-document token groups: {group_sizes}")
     max_k = max(5, config.map_at_k, *config.top_k, *config.recall_at_k)
     for length in lengths:
         model.max_seq_length = length
         if safe_max_seq_length(model) != length:
-            raise ValueError(f"Document window {length} exceeds this model's positional limit")
-        print(f"Evaluating {args.dataset_name} at document window {length} tokens")
+            raise ValueError(f"Document max_seq_length {length} exceeds this model's positional limit")
+        print(f"Evaluating {args.dataset_name} with document max_seq_length={length} tokens (truncation)")
         with torch.inference_mode():
             corpus_embeddings = model.encode(
                 corpus_texts, batch_size=args.batch_size, convert_to_tensor=True,
